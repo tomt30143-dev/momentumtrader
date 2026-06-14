@@ -36,20 +36,15 @@ def _has_supabase():
         return False
 
 # ── constants ─────────────────────────────────────────────────────────────────
-LOOKBACK_WEEKS  = 4
-MA_PERIOD       = 50
-BATCH_SIZE      = 100
-TAKE_PROFIT_PCT = 6.0
-STOP_LOSS_PCT   = -3.0
-
-NASDAQ_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
-OTHER_URL  = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
-
-SECTORS = [
-    "Technology", "Healthcare", "Financial Services", "Consumer Cyclical",
-    "Industrials", "Communication Services", "Consumer Defensive",
-    "Energy", "Basic Materials", "Real Estate", "Utilities",
-]
+MA_PERIOD         = 50
+ADR_MIN_PCT       = 3.0
+MOMENTUM_MIN_PCT  = 30.0
+CONSOL_MAX_PCT    = 10.0
+BREAKOUT_VOL_MULT = 1.5
+CONSOL_DAYS       = 10
+MOMENTUM_DAYS     = 60
+ADR_DAYS          = 20
+MA_10_PERIOD      = 10
 
 # ── page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -130,118 +125,113 @@ def load_watchlist():
     with open(WATCHLIST_FILE) as f:
         return [l.strip().upper() for l in f if l.strip()]
 
-# ── price helpers ─────────────────────────────────────────────────────────────
-def get_close(df, ticker=None):
-    close = df["Close"]
-    if isinstance(close, pd.DataFrame):
-        col = ticker if (ticker and ticker in close.columns) else close.columns[0]
-        return close[col].dropna()
-    return close.squeeze().dropna()
+# ── price / indicator helpers ─────────────────────────────────────────────────
+def flatten_df(df):
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
 
-def pct_return(series):
-    s = series.dropna()
-    if len(s) < 2:
-        return None
-    return float((s.iloc[-1] - s.iloc[0]) / s.iloc[0] * 100)
-
-def above_50ma(series):
-    s = series.dropna()
-    if len(s) < MA_PERIOD:
-        return False
-    return float(s.iloc[-1]) > float(s.iloc[-MA_PERIOD:].mean())
-
-# ── universe loader ───────────────────────────────────────────────────────────
-@st.cache_data(ttl=86400, show_spinner=False)
-def fetch_all_tickers():
-    tickers = set()
-    for url in [NASDAQ_URL, OTHER_URL]:
-        try:
-            resp = requests.get(url, timeout=15)
-            df = pd.read_csv(io.StringIO(resp.text), sep="|")[:-1]
-            sym_col = "Symbol" if "Symbol" in df.columns else df.columns[0]
-            raw = df[sym_col].dropna().astype(str)
-            tickers.update(raw[~raw.str.contains(r"[^A-Z]", regex=True)].tolist())
-        except Exception:
-            pass
-    wl = load_watchlist()
-    return sorted(set(tickers) | set(wl))
-
-# ── batch scanner ─────────────────────────────────────────────────────────────
-def scan_batch(tickers, period_days):
+def fetch_ticker(ticker, days=150):
     end   = datetime.today()
-    start = end - timedelta(days=period_days)
+    start = end - timedelta(days=days)
+    df = yf.download(ticker, start=start.strftime("%Y-%m-%d"),
+                     end=end.strftime("%Y-%m-%d"), progress=False, auto_adjust=True)
+    return flatten_df(df) if not df.empty else None
+
+def adr_pct(df):
+    r = df.tail(ADR_DAYS)
+    return float(((r["High"] - r["Low"]) / r["Close"] * 100).mean())
+
+def prior_momentum(df):
+    w = df.tail(MOMENTUM_DAYS)
+    lo, hi = float(w["Low"].min()), float(w["High"].max())
+    return (hi - lo) / lo * 100 if lo else 0.0
+
+def above_50ma(df):
+    c = df["Close"].dropna()
+    return len(c) >= MA_PERIOD and float(c.iloc[-1]) > float(c.iloc[-MA_PERIOD:].mean())
+
+def consolidation_stats(df):
+    w     = df.tail(CONSOL_DAYS)
+    full  = df.tail(ADR_DAYS)
+    hi, lo = float(w["High"].max()), float(w["Low"].min())
+    price  = float(df["Close"].iloc[-1])
+    rng    = (hi - lo) / price * 100
+    vol_dry = float(w["Volume"].mean()) < float(full["Volume"].mean())
+    return rng, vol_dry, lo
+
+def check_breakout(df):
+    if len(df) < CONSOL_DAYS + 2:
+        return False
+    today  = df.iloc[-1]
+    prior  = df.iloc[-(CONSOL_DAYS + 1):-1]
+    avg20  = float(df.tail(ADR_DAYS + 1).iloc[:-1]["Volume"].mean())
+    return (float(today["Close"]) > float(prior["High"].max()) and
+            float(today["Volume"]) >= BREAKOUT_VOL_MULT * avg20)
+
+def get_10d_ma(ticker):
     try:
-        df = yf.download(
-            tickers, start=start.strftime("%Y-%m-%d"), end=end.strftime("%Y-%m-%d"),
-            progress=False, auto_adjust=True, threads=True,
-        )
+        df = yf.download(ticker, period="30d", progress=False, auto_adjust=True)
+        df = flatten_df(df)
+        c  = df["Close"].dropna()
+        return float(c.iloc[-1]), float(c.iloc[-MA_10_PERIOD:].mean()) if len(c) >= MA_10_PERIOD else None
     except Exception:
-        return {}
-    if df.empty:
-        return {}
+        return None, None
 
-    results = {}
-    lookback = LOOKBACK_WEEKS * 5
-    for t in tickers:
-        try:
-            close = get_close(df, t)
-            if len(close) < max(MA_PERIOD, lookback + 1):
-                continue
-            ret = pct_return(close.iloc[-lookback:])
-            if ret is None or not above_50ma(close):
-                continue
-            results[t] = {"price": float(close.iloc[-1]), "return": ret}
-        except Exception:
-            continue
-    return results
+def days_held(entry_date_str):
+    try:
+        from datetime import date
+        return (date.today() - date.fromisoformat(entry_date_str)).days
+    except Exception:
+        return 0
 
-def run_full_scan(tickers, progress_bar, status_text):
-    period_days = LOOKBACK_WEEKS * 7 + 90
-    # SPY benchmark
-    status_text.text("Fetching SPY benchmark...")
-    spy_res = scan_batch(["SPY"], period_days)
-    spy_ret = spy_res.get("SPY", {}).get("return", 0.0)
+# ── Qullamaggie scanner ───────────────────────────────────────────────────────
+def scan_ticker_qmag(ticker):
+    df = fetch_ticker(ticker)
+    if df is None or len(df) < MA_PERIOD + CONSOL_DAYS + 5:
+        return None, "insufficient data"
+    adr = adr_pct(df)
+    if adr < ADR_MIN_PCT:
+        return None, f"ADR {adr:.1f}% < {ADR_MIN_PCT}%"
+    mom = prior_momentum(df)
+    if mom < MOMENTUM_MIN_PCT:
+        return None, f"prior move {mom:.1f}% < {MOMENTUM_MIN_PCT}%"
+    if not above_50ma(df):
+        return None, "below 50-day MA"
+    rng, vol_dry, consol_low = consolidation_stats(df)
+    if rng > CONSOL_MAX_PCT:
+        return None, f"consol range {rng:.1f}% > {CONSOL_MAX_PCT}%"
+    breakout = check_breakout(df)
+    price = float(df["Close"].iloc[-1])
+    risk  = round(price - consol_low, 2)
+    return {
+        "ticker":    ticker,
+        "price":     price,
+        "adr":       round(adr, 2),
+        "momentum":  round(mom, 1),
+        "range_pct": round(rng, 2),
+        "vol_dry":   vol_dry,
+        "breakout":  breakout,
+        "stop":      round(consol_low, 2),
+        "risk":      risk,
+        "target_1r": round(price + risk, 2),
+        "target_2r": round(price + 2 * risk, 2),
+        "target_3r": round(price + 3 * risk, 2),
+    }, None
 
-    non_spy = [t for t in tickers if t != "SPY"]
-    batches = [non_spy[i:i+BATCH_SIZE] for i in range(0, len(non_spy), BATCH_SIZE)]
-    qualifying = []
-
-    for i, batch in enumerate(batches):
-        pct = (i + 1) / len(batches)
-        progress_bar.progress(pct)
-        status_text.text(f"Scanning batch {i+1}/{len(batches)}  ({min((i+1)*BATCH_SIZE, len(non_spy))} of {len(non_spy)} tickers)...")
-        results = scan_batch(batch, period_days)
-        for ticker, data in results.items():
-            qualifying.append({
-                "ticker": ticker,
-                "price":  data["price"],
-                "return": data["return"],
-                "rs":     data["return"] - spy_ret,
-            })
-
+def run_watchlist_scan(tickers, progress_bar, status_text):
+    passing, rejected = [], []
+    for i, t in enumerate(tickers):
+        progress_bar.progress((i + 1) / len(tickers))
+        status_text.text(f"Scanning {t}  ({i+1}/{len(tickers)})...")
+        result, reason = scan_ticker_qmag(t)
+        if result:
+            passing.append(result)
+        else:
+            rejected.append((t, reason))
     progress_bar.progress(1.0)
-    status_text.text(f"Done — {len(qualifying)} qualifying stocks found.")
-    return qualifying, spy_ret
-
-# ── sector fetch ──────────────────────────────────────────────────────────────
-@st.cache_data(ttl=3600, show_spinner=False)
-def fetch_sector(ticker):
-    try:
-        info = yf.Ticker(ticker).info
-        return info.get("sector", "Unknown"), info.get("marketCap", 0)
-    except Exception:
-        return "Unknown", 0
-
-# ── live price ────────────────────────────────────────────────────────────────
-@st.cache_data(ttl=300, show_spinner=False)
-def get_live_price(ticker):
-    try:
-        hist = yf.Ticker(ticker).history(period="2d")
-        if hist.empty:
-            return None
-        return float(hist["Close"].iloc[-1])
-    except Exception:
-        return None
+    status_text.text(f"Done — {len(passing)} setups found.")
+    return passing, rejected
 
 # ── price chart ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -250,34 +240,39 @@ def get_chart_data(ticker, days=90):
     start = end - timedelta(days=days)
     df = yf.download(ticker, start=start.strftime("%Y-%m-%d"),
                      end=end.strftime("%Y-%m-%d"), progress=False, auto_adjust=True)
-    return df
+    return flatten_df(df) if not df.empty else pd.DataFrame()
 
-def build_price_chart(ticker, entry_price, target_price, stop_price):
+def build_price_chart(ticker, entry_price, stop_price, t1, t2, t3, ma10=None):
     df = get_chart_data(ticker)
     if df.empty:
         return None
-    close = get_close(df, ticker)
+    close = df["Close"].dropna()
     dates = close.index
-
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=dates, y=close.values, mode="lines", name=ticker,
         line=dict(color="#3498db", width=2),
-        fill="tozeroy", fillcolor="rgba(52,152,219,0.08)",
+        fill="tozeroy", fillcolor="rgba(52,152,219,0.06)",
     ))
+    if ma10 is not None:
+        ma_series = close.rolling(MA_10_PERIOD).mean()
+        fig.add_trace(go.Scatter(x=dates, y=ma_series.values, mode="lines",
+                                 name="10d MA", line=dict(color="#f39c12", width=1.5, dash="dot")))
     fig.add_hline(y=entry_price, line=dict(color="#f39c12", dash="dash", width=1.5),
                   annotation_text=f"Entry ${entry_price:.2f}", annotation_position="bottom right")
-    fig.add_hline(y=target_price, line=dict(color="#2ecc71", dash="dot", width=1.5),
-                  annotation_text=f"Target ${target_price:.2f}", annotation_position="top right")
     fig.add_hline(y=stop_price, line=dict(color="#e74c3c", dash="dot", width=1.5),
                   annotation_text=f"Stop ${stop_price:.2f}", annotation_position="bottom right")
+    for target, label, color in [(t1,"1R","#2ecc71"),(t2,"2R","#27ae60"),(t3,"3R","#1e8449")]:
+        if target:
+            fig.add_hline(y=target, line=dict(color=color, dash="dot", width=1),
+                          annotation_text=f"{label} ${target:.2f}", annotation_position="top right")
     fig.update_layout(
         paper_bgcolor="#0f1117", plot_bgcolor="#0f1117",
-        font=dict(color="#c9cdd4"), height=380,
+        font=dict(color="#c9cdd4"), height=400,
         margin=dict(l=10, r=10, t=30, b=10),
-        xaxis=dict(gridcolor="#1c1e26", showgrid=True),
-        yaxis=dict(gridcolor="#1c1e26", showgrid=True),
-        showlegend=False,
+        xaxis=dict(gridcolor="#1c1e26"),
+        yaxis=dict(gridcolor="#1c1e26"),
+        legend=dict(bgcolor="#1c1e26"),
     )
     return fig
 
@@ -318,124 +313,113 @@ def build_pnl_chart(trades):
 #  SIDEBAR
 # ═════════════════════════════════════════════════════════════════════════════
 with st.sidebar:
-    st.markdown("## 📈 Momentum Trader")
+    st.markdown("## 📈 Swing Trader")
+    st.caption("Qullamaggie VCP methodology")
     st.divider()
     page = st.radio("Navigate", ["🔍 Scanner", "📊 Open Trade", "📓 Journal"], label_visibility="collapsed")
     st.divider()
 
     if page == "🔍 Scanner":
         st.markdown("### Filters")
-        scan_mode = st.radio("Universe", ["Full US Market (~6k stocks)", "My Watchlist only"])
-        st.markdown("**Price range**")
         col1, col2 = st.columns(2)
         price_min = col1.number_input("Min $", value=5, min_value=0, step=1)
         price_max = col2.number_input("Max $", value=5000, min_value=1, step=50)
-        min_volume = st.number_input("Min avg volume (M)", value=0.5, step=0.1, format="%.1f") * 1_000_000
-        sector_filter = st.multiselect("Sector (optional — slower)", SECTORS)
-        exchange_filter = st.multiselect("Exchange", ["NASDAQ", "NYSE", "All"], default=["All"])
-        top_n = st.slider("Show top N picks", 3, 25, 5)
+        adr_min   = st.slider("Min ADR %", 1.0, 10.0, float(ADR_MIN_PCT), 0.5)
+        mom_min   = st.slider("Min prior move %", 10, 100, int(MOMENTUM_MIN_PCT), 5)
+        consol_max = st.slider("Max consol range %", 3.0, 20.0, float(CONSOL_MAX_PCT), 0.5)
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  PAGE: SCANNER
 # ═════════════════════════════════════════════════════════════════════════════
 if page == "🔍 Scanner":
-    st.title("🔍 Weekly Momentum Scanner")
-    st.caption(f"Finds stocks with the strongest relative momentum vs SPY, above their 50-day MA.")
+    st.title("🔍 VCP Breakout Scanner")
+    st.caption("Scans your watchlist for Volatility Contraction Pattern setups and confirmed breakouts.")
 
     run_btn = st.button("▶  Run Scan", type="primary", use_container_width=True)
 
     if run_btn:
-        if "Full" in scan_mode:
-            with st.spinner("Loading ticker universe..."):
-                tickers = fetch_all_tickers()
-        else:
-            tickers = load_watchlist()
-
+        tickers      = load_watchlist()
         progress_bar = st.progress(0.0)
         status_text  = st.empty()
-        results, spy_ret = run_full_scan(tickers, progress_bar, status_text)
-        st.session_state["scan_results"] = results
-        st.session_state["spy_ret"]      = spy_ret
-        st.session_state["scan_time"]    = datetime.now().strftime("%H:%M:%S")
+        passing, rejected = run_watchlist_scan(tickers, progress_bar, status_text)
+        st.session_state["scan_passing"]  = passing
+        st.session_state["scan_rejected"] = rejected
+        st.session_state["scan_time"]     = datetime.now().strftime("%H:%M:%S")
 
-    if "scan_results" in st.session_state:
-        results  = st.session_state["scan_results"]
-        spy_ret  = st.session_state["spy_ret"]
+    if "scan_passing" in st.session_state:
+        passing  = st.session_state["scan_passing"]
+        rejected = st.session_state["scan_rejected"]
         scan_time = st.session_state.get("scan_time", "")
 
-        st.markdown(f"**SPY 4-week return:** {spy_ret:+.2f}%  &nbsp;|&nbsp;  **Scanned at:** {scan_time}  &nbsp;|&nbsp;  **Qualifying stocks:** {len(results)}")
+        # apply sidebar filters
+        filtered = [s for s in passing
+                    if price_min <= s["price"] <= price_max
+                    and s["adr"] >= adr_min
+                    and s["momentum"] >= mom_min
+                    and s["range_pct"] <= consol_max]
 
-        # apply filters
-        filtered = [r for r in results if price_min <= r["price"] <= price_max]
+        breakouts = [s for s in filtered if s["breakout"]]
+        on_watch  = [s for s in filtered if not s["breakout"]]
+        on_watch.sort(key=lambda x: x["range_pct"])
 
-        # sector filter (fetch info for top 200 by RS only)
-        if sector_filter:
-            with st.spinner(f"Fetching sector data for top results..."):
-                top200 = sorted(filtered, key=lambda x: x["rs"], reverse=True)[:200]
-                for r in top200:
-                    s, mc = fetch_sector(r["ticker"])
-                    r["sector"] = s
-                    r["market_cap"] = mc
-                filtered = [r for r in top200 if r.get("sector", "Unknown") in sector_filter]
-        else:
-            for r in filtered:
-                r.setdefault("sector", "—")
-                r.setdefault("market_cap", 0)
+        st.markdown(f"**Scanned at:** {scan_time}  &nbsp;|&nbsp;  **Setups found:** {len(filtered)}  &nbsp;|&nbsp;  **Breakouts:** {len(breakouts)}  &nbsp;|&nbsp;  **On watch:** {len(on_watch)}")
 
-        ranked = sorted(filtered, key=lambda x: x["rs"], reverse=True)[:top_n]
-
-        if not ranked:
-            st.warning("No stocks match your current filters. Try widening the price range or removing sector filters.")
-        else:
-            # top pick highlight
-            best = ranked[0]
+        # ── breakouts ─────────────────────────────────────────────────────────
+        if breakouts:
             st.divider()
-            st.markdown(f"### 🥇 Top Pick — `{best['ticker']}`")
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Price",      f"${best['price']:.2f}")
-            c2.metric("4-wk Return", f"{best['return']:+.2f}%")
-            c3.metric("RS vs SPY",   f"{best['rs']:+.2f}%")
-            c4.metric("Target (+6%)", f"${best['price']*1.06:.2f}")
-
+            st.markdown("### 🚀 Confirmed Breakouts")
             journal = load_journal()
-            if journal.get("open_trade"):
-                st.info(f"⚠️  You already have an open trade: **{journal['open_trade']['ticker']}** @ ${journal['open_trade']['entry_price']:.2f}. Close it first in the Open Trade page.")
-            else:
-                if st.button(f"✅  Open trade on {best['ticker']} @ ${best['price']:.2f}", type="primary"):
-                    trade = {
-                        "ticker":       best["ticker"],
-                        "entry_price":  best["price"],
-                        "entry_date":   datetime.today().strftime("%Y-%m-%d"),
-                        "target_price": round(best["price"] * 1.06, 2),
-                        "stop_price":   round(best["price"] * 0.97, 2),
-                        "rs_score":     round(best["rs"], 2),
-                    }
-                    journal["open_trade"] = trade
-                    save_journal(journal)
-                    st.success(f"Trade opened: {trade['ticker']} @ ${trade['entry_price']:.2f}")
+            for s in breakouts:
+                with st.container(border=True):
+                    c1, c2, c3, c4, c5 = st.columns(5)
+                    c1.metric("Ticker",        s["ticker"])
+                    c2.metric("Price",         f"${s['price']:.2f}")
+                    c3.metric("ADR",           f"{s['adr']:.1f}%")
+                    c4.metric("Prior move",    f"{s['momentum']:.0f}%")
+                    c5.metric("Consol range",  f"{s['range_pct']:.1f}%")
+                    st.markdown(f"**Stop:** ${s['stop']:.2f}  &nbsp;|&nbsp;  **Risk/share:** ${s['risk']:.2f}  &nbsp;|&nbsp;  **1R:** ${s['target_1r']:.2f}  &nbsp;|&nbsp;  **2R:** ${s['target_2r']:.2f}  &nbsp;|&nbsp;  **3R:** ${s['target_3r']:.2f}")
+                    if journal.get("open_trade"):
+                        st.caption(f"⚠️  Close existing {journal['open_trade']['ticker']} trade first.")
+                    else:
+                        if st.button(f"✅  Open trade on {s['ticker']}", key=f"open_{s['ticker']}", type="primary"):
+                            trade = {
+                                "ticker":      s["ticker"],
+                                "entry_price": s["price"],
+                                "entry_date":  datetime.today().strftime("%Y-%m-%d"),
+                                "stop_price":  s["stop"],
+                                "risk":        s["risk"],
+                                "target_1r":   s["target_1r"],
+                                "target_2r":   s["target_2r"],
+                                "target_3r":   s["target_3r"],
+                                "adr":         s["adr"],
+                                "momentum":    s["momentum"],
+                            }
+                            journal["open_trade"] = trade
+                            save_journal(journal)
+                            st.success(f"Trade opened: {s['ticker']} @ ${s['price']:.2f}")
 
-            # full ranked table
+        # ── on watch ──────────────────────────────────────────────────────────
+        if on_watch:
             st.divider()
-            st.markdown(f"### Top {len(ranked)} Momentum Picks")
-            df_display = pd.DataFrame(ranked)
-            df_display = df_display.rename(columns={
-                "ticker": "Ticker", "price": "Price", "return": "4wk Return %",
-                "rs": "RS vs SPY %", "sector": "Sector",
-            })
-            display_cols = [c for c in ["Ticker","Price","4wk Return %","RS vs SPY %","Sector"] if c in df_display.columns]
-            df_display = df_display[display_cols]
-            df_display["Price"] = df_display["Price"].map("${:.2f}".format)
+            st.markdown("### 👁 On Watch — Consolidating")
+            df_watch = pd.DataFrame(on_watch)[["ticker","price","adr","momentum","range_pct","vol_dry","stop","target_1r","target_2r","target_3r"]]
+            df_watch.columns = ["Ticker","Price","ADR%","Prior Move%","Consol Range%","Vol Drying","Stop","1R","2R","3R"]
+            df_watch["Price"] = df_watch["Price"].map("${:.2f}".format)
+            df_watch["Stop"]  = df_watch["Stop"].map("${:.2f}".format)
+            df_watch["1R"]    = df_watch["1R"].map("${:.2f}".format)
+            df_watch["2R"]    = df_watch["2R"].map("${:.2f}".format)
+            df_watch["3R"]    = df_watch["3R"].map("${:.2f}".format)
+            df_watch["Vol Drying"] = df_watch["Vol Drying"].map(lambda x: "✅ Yes" if x else "No")
+            st.dataframe(df_watch, use_container_width=True, hide_index=True)
 
-            def color_rs(val):
-                if isinstance(val, float):
-                    color = "#2ecc71" if val > 0 else "#e74c3c"
-                    return f"color: {color}; font-weight: bold"
-                return ""
+        if not filtered:
+            st.info("No setups pass your filters right now. Try loosening the sliders or adding more tickers to your watchlist.")
 
-            st.dataframe(
-                df_display.style.map(color_rs, subset=["RS vs SPY %","4wk Return %"]),
-                use_container_width=True, hide_index=True,
-            )
+        # ── rejected ──────────────────────────────────────────────────────────
+        if rejected:
+            with st.expander(f"Filtered out ({len(rejected)} tickers)"):
+                for t, reason in rejected:
+                    st.caption(f"**{t}** — {reason}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 #  PAGE: OPEN TRADE
@@ -443,77 +427,82 @@ if page == "🔍 Scanner":
 elif page == "📊 Open Trade":
     st.title("📊 Open Trade")
     journal = load_journal()
-    trade = journal.get("open_trade")
+    trade   = journal.get("open_trade")
 
     if not trade:
-        st.info("No open trade. Run the scanner on Monday to get this week's pick.")
+        st.info("No open trade. Run the scanner to find a breakout setup.")
     else:
-        ticker       = trade["ticker"]
-        entry        = trade["entry_price"]
-        target       = trade["target_price"]
-        stop         = trade["stop_price"]
-        entry_date   = trade["entry_date"]
+        ticker     = trade["ticker"]
+        entry      = trade["entry_price"]
+        stop       = trade["stop_price"]
+        risk       = trade.get("risk", entry - stop)
+        t1         = trade.get("target_1r")
+        t2         = trade.get("target_2r")
+        t3         = trade.get("target_3r")
+        entry_date = trade["entry_date"]
+        held       = days_held(entry_date)
 
-        # live price
-        with st.spinner("Fetching live price..."):
-            current = get_live_price(ticker)
+        with st.spinner("Fetching live price and 10-day MA..."):
+            current, ma10 = get_10d_ma(ticker)
 
-        if current:
-            chg = (current - entry) / entry * 100
+        chg = (current - entry) / entry * 100 if current else 0.0
+
+        # ── Qullamaggie exit signals ──────────────────────────────────────────
+        if current and ma10 and current < ma10:
+            st.markdown(f'<div class="stop-alert">🔴 <b>FULL EXIT SIGNAL</b> — {ticker} closed below the 10-day MA (${ma10:.2f}). Qullamaggie trailing stop rule: exit the remaining position.</div>', unsafe_allow_html=True)
+            st.markdown("")
+        elif 3 <= held <= 5:
+            st.markdown(f'<div class="sell-alert">🟡 <b>DAY {held} REMINDER</b> — Qullamaggie rule: consider selling 1/3 to 1/2 of your position now and moving your stop to breakeven (${entry:.2f}) on the rest.</div>', unsafe_allow_html=True)
+            st.markdown("")
         else:
-            current, chg = entry, 0.0
-
-        # alert banners
-        if chg >= TAKE_PROFIT_PCT:
-            st.markdown(f'<div class="sell-alert">🟢 <b>SELL ALERT</b> — {ticker} is up <b>{chg:+.2f}%</b> from entry. You\'ve hit your +6% target!</div>', unsafe_allow_html=True)
-            st.markdown("")
-        elif chg <= STOP_LOSS_PCT:
-            st.markdown(f'<div class="stop-alert">🔴 <b>STOP LOSS WARNING</b> — {ticker} is down <b>{chg:.2f}%</b> from entry. Consider cutting the position.</div>', unsafe_allow_html=True)
-            st.markdown("")
-        else:
-            st.markdown(f'<div class="info-alert">🔵 Holding — {ticker} is <b>{chg:+.2f}%</b> from entry.</div>', unsafe_allow_html=True)
+            above = f"${current - ma10:.2f} above 10-day MA" if (current and ma10) else ""
+            st.markdown(f'<div class="info-alert">🔵 <b>HOLD</b> — {ticker} is still above the 10-day MA. {above}</div>', unsafe_allow_html=True)
             st.markdown("")
 
-        # metric row
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Ticker",      ticker)
-        c2.metric("Entry Price", f"${entry:.2f}", delta=f"Entry date: {entry_date}", delta_color="off")
-        c3.metric("Current",     f"${current:.2f}" if current else "—", delta=f"{chg:+.2f}%" if current else None,
-                  delta_color="normal")
-        c4.metric("Target +6%",  f"${target:.2f}")
-        c5.metric("Stop -3%",    f"${stop:.2f}")
+        # metrics
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Ticker",    ticker)
+        c2.metric("Entry",     f"${entry:.2f}", delta=f"Day {held}", delta_color="off")
+        c3.metric("Current",   f"${current:.2f}" if current else "—", delta=f"{chg:+.2f}%", delta_color="normal")
+        c4.metric("10d MA",    f"${ma10:.2f}" if ma10 else "—")
+        c5.metric("Stop",      f"${stop:.2f}")
+        c6.metric("Risk/share",f"${risk:.2f}")
 
-        # chart
+        st.markdown(f"**Targets:** &nbsp; 1R `${t1:.2f}` &nbsp;&nbsp; 2R `${t2:.2f}` &nbsp;&nbsp; 3R `${t3:.2f}`" if t1 else "")
+
         st.divider()
-        fig = build_price_chart(ticker, entry, target, stop)
+        fig = build_price_chart(ticker, entry, stop, t1, t2, t3, ma10)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
 
-        # close trade form
         st.divider()
-        st.markdown("### Close This Trade")
+        st.markdown("### Close Position")
         with st.form("close_form"):
-            exit_price = st.number_input("Exit price", min_value=0.01, value=float(f"{current:.2f}") if current else entry, step=0.01)
+            exit_price = st.number_input("Exit price", min_value=0.01,
+                                         value=float(f"{current:.2f}") if current else float(entry), step=0.01)
             submitted  = st.form_submit_button("💰  Close Trade & Save Result", type="primary")
             if submitted:
                 ret    = (exit_price - entry) / entry * 100
+                r_mult = (exit_price - entry) / risk if risk else 0
                 result = "WIN" if ret > 0 else "LOSS"
                 closed = {
-                    "ticker":       ticker,
-                    "entry_price":  entry,
-                    "entry_date":   entry_date,
-                    "exit_price":   exit_price,
-                    "exit_date":    datetime.today().strftime("%Y-%m-%d"),
-                    "return_pct":   round(ret, 3),
-                    "result":       result,
-                    "rs_score":     trade.get("rs_score"),
+                    "ticker":      ticker,
+                    "entry_price": entry,
+                    "entry_date":  entry_date,
+                    "exit_price":  exit_price,
+                    "exit_date":   datetime.today().strftime("%Y-%m-%d"),
+                    "return_pct":  round(ret, 3),
+                    "r_multiple":  round(r_mult, 2),
+                    "result":      result,
+                    "adr":         trade.get("adr"),
+                    "momentum":    trade.get("momentum"),
                 }
                 journal["closed_trades"].append(closed)
                 journal["open_trade"] = None
                 save_journal(journal)
-                color = "green" if ret > 0 else "red"
-                st.markdown(f'<span class="{color}">Trade closed: {ticker}  {ret:+.2f}%  [{result}]</span>', unsafe_allow_html=True)
-                st.balloons() if ret > 0 else None
+                st.markdown(f'Trade closed: **{ticker}**  {ret:+.2f}%  [{r_mult:+.2f}R]  **{result}**')
+                if ret > 0:
+                    st.balloons()
                 time.sleep(1)
                 st.rerun()
 
@@ -535,12 +524,15 @@ elif page == "📓 Journal":
         worst    = min(returns)
         cumul    = sum(returns)
 
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Total Trades",   len(trades))
-        c2.metric("Win Rate",       f"{win_rate:.1f}%")
-        c3.metric("Avg Weekly Ret", f"{avg_ret:+.2f}%", delta_color="normal")
-        c4.metric("Best Trade",     f"{best:+.2f}%")
-        c5.metric("Cumulative",     f"{cumul:+.2f}%", delta_color="normal")
+        r_mults  = [t.get("r_multiple", 0) for t in trades]
+        avg_r    = sum(r_mults) / len(r_mults) if r_mults else 0
+        c1, c2, c3, c4, c5, c6 = st.columns(6)
+        c1.metric("Total Trades",  len(trades))
+        c2.metric("Win Rate",      f"{win_rate:.1f}%")
+        c3.metric("Avg Return",    f"{avg_ret:+.2f}%")
+        c4.metric("Avg R-Multiple",f"{avg_r:+.2f}R")
+        c5.metric("Best Trade",    f"{best:+.2f}%")
+        c6.metric("Cumulative",    f"{cumul:+.2f}%")
 
         # P&L chart
         st.divider()
@@ -556,9 +548,9 @@ elif page == "📓 Journal":
         df = df.rename(columns={
             "ticker": "Ticker", "entry_price": "Entry $", "exit_price": "Exit $",
             "entry_date": "Opened", "exit_date": "Closed",
-            "return_pct": "Return %", "result": "Result", "rs_score": "RS Score",
+            "return_pct": "Return %", "result": "Result", "r_multiple": "R Multiple",
         })
-        display_cols = ["Ticker","Opened","Closed","Entry $","Exit $","Return %","Result","RS Score"]
+        display_cols = ["Ticker","Opened","Closed","Entry $","Exit $","Return %","R Multiple","Result"]
         df = df[[c for c in display_cols if c in df.columns]]
         df["Entry $"] = df["Entry $"].map("${:.2f}".format)
         df["Exit $"]  = df["Exit $"].map("${:.2f}".format)

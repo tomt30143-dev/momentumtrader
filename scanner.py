@@ -1,41 +1,40 @@
 """
-Weekly Momentum Scanner
-Run every Monday to find the top momentum pick for the week.
+Qullamaggie Swing Trading Scanner
+Scans watchlist.txt for VCP (Volatility Contraction Pattern) setups and breakouts.
 
 Usage:
-  python scanner.py              # scan all ~6000 US-listed stocks
-  python scanner.py --watchlist  # scan watchlist.txt only (fast)
-  python scanner.py --top 10     # show top N picks (default 5)
+  python scanner.py              # scan watchlist.txt
+  python scanner.py --top 10    # show top N candidates (default: all that pass)
 """
 
 import json
 import os
 import sys
-import io
 from datetime import datetime, timedelta
 
-import requests
-import pandas as pd
 import yfinance as yf
+import pandas as pd
 
-WATCHLIST_FILE = os.path.join(os.path.dirname(__file__), "watchlist.txt")
-JOURNAL_FILE = os.path.join(os.path.dirname(__file__), "journal.json")
+BASE           = os.path.dirname(__file__)
+WATCHLIST_FILE = os.path.join(BASE, "watchlist.txt")
+JOURNAL_FILE   = os.path.join(BASE, "journal.json")
 
-TOP_N = 5
-LOOKBACK_WEEKS = 4
-MA_PERIOD = 50
-BATCH_SIZE = 100  # tickers per yfinance batch download
+# ── filter thresholds ─────────────────────────────────────────────────────────
+ADR_MIN_PCT          = 3.0    # minimum average daily range %
+MOMENTUM_MIN_PCT     = 30.0   # minimum prior 60-day low-to-high move %
+CONSOL_MAX_PCT       = 10.0   # maximum consolidation range % (VCP tightness)
+BREAKOUT_VOL_MULT    = 1.5    # today's volume must be >= this * 20d avg volume
+CONSOL_DAYS          = 10     # days to look back for consolidation window
+MOMENTUM_DAYS        = 60     # days to look back for prior momentum move
+ADR_DAYS             = 20     # days for average daily range calculation
+MA_PERIOD            = 50     # trend filter moving average
 
-# NASDAQ public symbol directory — all US exchange-listed stocks
-NASDAQ_LISTED_URL = "https://www.nasdaqtrader.com/dynamic/symdir/nasdaqlisted.txt"
-OTHER_LISTED_URL  = "https://www.nasdaqtrader.com/dynamic/symdir/otherlisted.txt"
 
-
-# ── data helpers ──────────────────────────────────────────────────────────────
+# ── helpers ───────────────────────────────────────────────────────────────────
 
 def load_watchlist():
     with open(WATCHLIST_FILE) as f:
-        return [line.strip().upper() for line in f if line.strip()]
+        return [l.strip().upper() for l in f if l.strip()]
 
 
 def load_journal():
@@ -48,115 +47,150 @@ def save_journal(data):
         json.dump(data, f, indent=2)
 
 
-def fetch_all_us_tickers():
-    """Download the full NASDAQ + other-exchange listing files and return clean tickers."""
-    tickers = set()
-
-    for url, name in [(NASDAQ_LISTED_URL, "NASDAQ"), (OTHER_LISTED_URL, "Other exchanges")]:
-        try:
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-            df = pd.read_csv(io.StringIO(resp.text), sep="|")
-            # last row is a file-creation timestamp line — drop it
-            df = df[:-1]
-            sym_col = "Symbol" if "Symbol" in df.columns else df.columns[0]
-            # filter out test symbols, ETNs, warrants, units, rights
-            raw = df[sym_col].dropna().astype(str)
-            clean = raw[
-                ~raw.str.contains(r"[^A-Z]", regex=True)  # only pure alpha tickers
-            ]
-            tickers.update(clean.tolist())
-            print(f"  {name}: {len(clean)} tickers loaded")
-        except Exception as e:
-            print(f"  WARNING: could not fetch {name} list ({e})")
-
-    return sorted(tickers)
-
-
-# ── price helpers ─────────────────────────────────────────────────────────────
-
-def get_close(df, ticker=None):
-    """Return Close column as a flat Series for single or multi-ticker DataFrames."""
-    close = df["Close"]
-    if isinstance(close, pd.DataFrame):
-        if ticker and ticker in close.columns:
-            return close[ticker].dropna()
-        return close.iloc[:, 0].dropna()
-    if hasattr(close, "squeeze"):
-        close = close.squeeze()
-    return close.dropna()
-
-
-def pct_return(series):
-    s = series.dropna()
-    if len(s) < 2:
-        return None
-    return float((s.iloc[-1] - s.iloc[0]) / s.iloc[0] * 100)
-
-
-def above_50ma(series):
-    s = series.dropna()
-    if len(s) < MA_PERIOD:
-        return False
-    ma50 = float(s.iloc[-MA_PERIOD:].mean())
-    return float(s.iloc[-1]) > ma50
-
-
-# ── batch scanning ────────────────────────────────────────────────────────────
-
-def scan_batch(tickers, period_days):
-    """
-    Download a batch of tickers in one yfinance call.
-    Returns dict: ticker -> {"price", "return", "rs"} or None on failure.
-    """
+def fetch(ticker, days=120):
     end   = datetime.today()
-    start = end - timedelta(days=period_days)
-    start_str = start.strftime("%Y-%m-%d")
-    end_str   = end.strftime("%Y-%m-%d")
-
-    try:
-        df = yf.download(
-            tickers,
-            start=start_str,
-            end=end_str,
-            progress=False,
-            auto_adjust=True,
-            threads=True,
-        )
-    except Exception:
-        return {}
-
+    start = end - timedelta(days=days)
+    df = yf.download(
+        ticker,
+        start=start.strftime("%Y-%m-%d"),
+        end=end.strftime("%Y-%m-%d"),
+        progress=False,
+        auto_adjust=True,
+    )
     if df.empty:
-        return {}
+        return None
+    # flatten MultiIndex if present (yfinance sometimes returns one for single ticker)
+    if isinstance(df.columns, pd.MultiIndex):
+        df.columns = df.columns.get_level_values(0)
+    return df
 
-    results = {}
-    lookback_rows = LOOKBACK_WEEKS * 5  # approx trading days
 
-    for ticker in tickers:
-        try:
-            close = get_close(df, ticker)
-            if len(close) < max(MA_PERIOD, lookback_rows + 1):
-                continue
-            recent = close.iloc[-lookback_rows:]
-            ret = pct_return(recent)
-            if ret is None:
-                continue
-            if not above_50ma(close):
-                continue
-            price = float(close.iloc[-1])
-            results[ticker] = {"price": price, "return": ret}
-        except Exception:
-            continue
+def adr_pct(df, n=ADR_DAYS):
+    """Average Daily Range % over last n days."""
+    recent = df.tail(n)
+    daily_range = (recent["High"] - recent["Low"]) / recent["Close"] * 100
+    return float(daily_range.mean())
 
-    return results
+
+def prior_momentum(df, n=MOMENTUM_DAYS):
+    """Low-to-high % move over the last n trading days."""
+    window = df.tail(n)
+    lo  = float(window["Low"].min())
+    hi  = float(window["High"].max())
+    if lo == 0:
+        return 0.0
+    return (hi - lo) / lo * 100
+
+
+def above_50ma(df):
+    """True if latest close is above the 50-day SMA."""
+    closes = df["Close"].dropna()
+    if len(closes) < MA_PERIOD:
+        return False
+    ma = float(closes.iloc[-MA_PERIOD:].mean())
+    return float(closes.iloc[-1]) > ma
+
+
+def consolidation(df, n=CONSOL_DAYS):
+    """
+    Returns:
+      range_pct   — (highest high - lowest low) / current price * 100 over last n days
+      vol_dry     — True if avg volume last n days < avg volume last 20 days
+    """
+    window   = df.tail(n)
+    full_vol = df.tail(ADR_DAYS)
+
+    hi        = float(window["High"].max())
+    lo        = float(window["Low"].min())
+    price     = float(df["Close"].iloc[-1])
+    range_pct = (hi - lo) / price * 100
+
+    avg_vol_consol = float(window["Volume"].mean())
+    avg_vol_20d    = float(full_vol["Volume"].mean())
+    vol_dry        = avg_vol_consol < avg_vol_20d
+
+    return range_pct, vol_dry, lo  # lo = suggested stop
+
+
+def is_breakout(df, n=CONSOL_DAYS):
+    """
+    True if today's close is above the highest high of the prior n days
+    AND today's volume >= BREAKOUT_VOL_MULT * 20-day avg volume.
+    'Prior n days' excludes today.
+    """
+    if len(df) < n + 2:
+        return False
+
+    today        = df.iloc[-1]
+    prior_window = df.iloc[-(n + 1):-1]  # n days before today
+
+    prior_high   = float(prior_window["High"].max())
+    today_close  = float(today["Close"])
+    today_vol    = float(today["Volume"])
+    avg_vol_20d  = float(df.tail(ADR_DAYS + 1).iloc[:-1]["Volume"].mean())
+
+    broke_out    = today_close > prior_high
+    vol_confirm  = today_vol >= BREAKOUT_VOL_MULT * avg_vol_20d
+    return broke_out and vol_confirm
+
+
+# ── scanner ───────────────────────────────────────────────────────────────────
+
+def scan_ticker(ticker):
+    df = fetch(ticker)
+    if df is None or len(df) < MA_PERIOD + CONSOL_DAYS + 5:
+        return None, f"insufficient data"
+
+    # 1. ADR filter
+    adr = adr_pct(df)
+    if adr < ADR_MIN_PCT:
+        return None, f"ADR {adr:.1f}% < {ADR_MIN_PCT}% — doesn't move enough"
+
+    # 2. Prior momentum filter
+    mom = prior_momentum(df)
+    if mom < MOMENTUM_MIN_PCT:
+        return None, f"prior move {mom:.1f}% < {MOMENTUM_MIN_PCT}% — no institutional momentum"
+
+    # 3. Trend filter (above 50 MA)
+    if not above_50ma(df):
+        return None, f"below 50-day MA — hard reject"
+
+    # 4. Consolidation / VCP
+    range_pct, vol_dry, consol_low = consolidation(df)
+    if range_pct > CONSOL_MAX_PCT:
+        return None, f"consolidation range {range_pct:.1f}% > {CONSOL_MAX_PCT}% — not tight enough"
+
+    # 5. Breakout check
+    breakout = is_breakout(df)
+
+    price      = float(df["Close"].iloc[-1])
+    stop       = round(consol_low, 2)
+    risk       = round(price - stop, 2)
+    target_1r  = round(price + risk, 2)
+    target_2r  = round(price + 2 * risk, 2)
+    target_3r  = round(price + 3 * risk, 2)
+
+    return {
+        "ticker":       ticker,
+        "price":        price,
+        "adr":          round(adr, 2),
+        "momentum":     round(mom, 1),
+        "range_pct":    round(range_pct, 2),
+        "vol_dry":      vol_dry,
+        "breakout":     breakout,
+        "stop":         stop,
+        "risk":         risk,
+        "target_1r":    target_1r,
+        "target_2r":    target_2r,
+        "target_3r":    target_3r,
+    }, None
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
 
 def main():
-    args = sys.argv[1:]
-    use_watchlist = "--watchlist" in args
-    top_n = TOP_N
+    args  = sys.argv[1:]
+    top_n = None
     if "--top" in args:
         idx = args.index("--top")
         try:
@@ -164,115 +198,94 @@ def main():
         except (IndexError, ValueError):
             pass
 
-    print("\n=== Weekly Momentum Scanner ===")
+    print("\n=== Qullamaggie Swing Trading Scanner ===")
     print(f"Date: {datetime.today().strftime('%A, %B %d %Y')}\n")
 
-    # ── tickers ───────────────────────────────────────────────────────────────
-    if use_watchlist:
-        tickers = load_watchlist()
-        print(f"Mode: watchlist ({len(tickers)} tickers)\n")
-    else:
-        print("Mode: full US market — fetching ticker universe...")
-        tickers = fetch_all_us_tickers()
-        # always include watchlist tickers
-        wl = load_watchlist()
-        tickers = sorted(set(tickers) | set(wl))
-        print(f"  Total tickers to scan: {len(tickers)}\n")
+    tickers   = load_watchlist()
+    passing   = []
+    rejected  = []
 
-    period_days = LOOKBACK_WEEKS * 7 + 90  # enough calendar days for 50 trading days
+    print(f"Scanning {len(tickers)} tickers...\n")
 
-    # ── SPY benchmark ─────────────────────────────────────────────────────────
-    print("Fetching SPY benchmark...")
-    spy_batch = scan_batch(["SPY"], period_days)
-    if "SPY" not in spy_batch:
-        # fallback: direct fetch
-        end = datetime.today()
-        spy_df = yf.download("SPY", start=(end - timedelta(days=period_days)).strftime("%Y-%m-%d"),
-                             end=end.strftime("%Y-%m-%d"), progress=False, auto_adjust=True)
-        spy_close = get_close(spy_df)
-        spy_ret = pct_return(spy_close.iloc[-(LOOKBACK_WEEKS * 5):])
-    else:
-        spy_ret = spy_batch["SPY"]["return"]
+    for ticker in tickers:
+        result, reason = scan_ticker(ticker)
+        if result:
+            passing.append(result)
+        else:
+            rejected.append((ticker, reason))
 
-    if spy_ret is None:
-        print("ERROR: Could not fetch SPY data. Check your internet connection.")
+    # sort: breakouts first, then by tightest consolidation range
+    passing.sort(key=lambda x: (not x["breakout"], x["range_pct"]))
+
+    if top_n:
+        passing = passing[:top_n]
+
+    # ── print rejected ────────────────────────────────────────────────────────
+    if rejected:
+        print("FILTERED OUT:")
+        for ticker, reason in rejected:
+            print(f"  {ticker:<8} — {reason}")
+        print()
+
+    # ── print results ─────────────────────────────────────────────────────────
+    if not passing:
+        print("No stocks passed all filters this scan.")
+        print("Tip: add more tickers to watchlist.txt or check back after a trending week.")
         return
 
-    print(f"SPY 4-week return: {spy_ret:+.2f}%\n")
+    print(f"{'='*70}")
+    print(f"  PASSING SETUPS  ({len(passing)} stocks)")
+    print(f"{'='*70}")
 
-    # ── scan in batches ───────────────────────────────────────────────────────
-    non_spy = [t for t in tickers if t != "SPY"]
-    batches = [non_spy[i:i + BATCH_SIZE] for i in range(0, len(non_spy), BATCH_SIZE)]
-    total_batches = len(batches)
+    breakouts   = [s for s in passing if s["breakout"]]
+    on_watch    = [s for s in passing if not s["breakout"]]
 
-    qualifying = []
-    filtered_count = 0
-    error_count = 0
+    def print_stock(s, label):
+        print(f"\n  [{label}]  {s['ticker']}  @ ${s['price']:.2f}")
+        print(f"  ADR: {s['adr']:.1f}%   Prior move: {s['momentum']:.1f}%   Consol range: {s['range_pct']:.1f}%   Vol drying up: {'Yes' if s['vol_dry'] else 'No'}")
+        print(f"  Stop loss:  ${s['stop']:.2f}  (lowest low of consolidation)")
+        print(f"  Risk/share: ${s['risk']:.2f}")
+        print(f"  Targets:    1R=${s['target_1r']:.2f}   2R=${s['target_2r']:.2f}   3R=${s['target_3r']:.2f}")
 
-    print(f"Scanning {len(non_spy)} tickers in {total_batches} batches of {BATCH_SIZE}...")
-    print("(Tickers below 50-day MA are silently filtered)\n")
+    for s in breakouts:
+        print_stock(s, "*** BREAKOUT — BUY SIGNAL ***")
 
-    for i, batch in enumerate(batches, 1):
-        print(f"  Batch {i}/{total_batches}  ({(i-1)*BATCH_SIZE}–{min(i*BATCH_SIZE, len(non_spy))} of {len(non_spy)})...", end="\r")
-        results = scan_batch(batch, period_days)
+    for s in on_watch:
+        print_stock(s, "On Watch — Consolidating")
 
-        for ticker, data in results.items():
-            rs = data["return"] - spy_ret
-            qualifying.append({
-                "ticker": ticker,
-                "price": data["price"],
-                "return": data["return"],
-                "rs": rs,
-            })
+    print(f"\n{'='*70}\n")
 
-        filtered_count += len(batch) - len(results)
-
-    print(f"\n\nScan complete.")
-    print(f"  Qualifying (above 50MA): {len(qualifying)}")
-    print(f"  Filtered out (below 50MA or no data): {filtered_count}")
-
-    if not qualifying:
-        print("\nNo qualifying stocks found. Try running on a trading day.")
-        return
-
-    ranked = sorted(qualifying, key=lambda x: x["rs"], reverse=True)
-    top = ranked[:top_n]
-
-    print(f"\n{'='*58}")
-    print(f"  TOP {top_n} MOMENTUM PICKS  (ranked by RS vs SPY)")
-    print(f"{'='*58}")
-    print(f"  {'Rank':<5} {'Ticker':<8} {'Price':>9}  {'4wk Ret':>9}  {'RS Score':>9}")
-    print(f"  {'-'*5} {'-'*8} {'-'*9}  {'-'*9}  {'-'*9}")
-    for i, s in enumerate(top, 1):
-        print(f"  #{i:<4} {s['ticker']:<8} ${s['price']:>8.2f}  {s['return']:>+8.2f}%  {s['rs']:>+8.2f}%")
-    print(f"{'='*58}\n")
-
-    best = top[0]
-    journal = load_journal()
-
-    if journal.get("open_trade"):
-        existing = journal["open_trade"]
-        print(f"NOTE: Open trade exists: {existing['ticker']} @ ${existing['entry_price']:.2f}")
-        print(f"Close it in journal_app.py before opening a new one.")
-        print(f"\nTop pick this week: {best['ticker']} @ ${best['price']:.2f}  RS: {best['rs']:+.2f}%")
+    # ── auto-save breakout to journal ─────────────────────────────────────────
+    if breakouts:
+        journal = load_journal()
+        if journal.get("open_trade"):
+            existing = journal["open_trade"]
+            print(f"NOTE: Open trade exists ({existing['ticker']} @ ${existing['entry_price']:.2f}). Close it before opening a new one.")
+            print(f"Top breakout this scan: {breakouts[0]['ticker']} @ ${breakouts[0]['price']:.2f}")
+        else:
+            best = breakouts[0]
+            trade = {
+                "ticker":      best["ticker"],
+                "entry_price": best["price"],
+                "entry_date":  datetime.today().strftime("%Y-%m-%d"),
+                "stop_price":  best["stop"],
+                "risk":        best["risk"],
+                "target_1r":   best["target_1r"],
+                "target_2r":   best["target_2r"],
+                "target_3r":   best["target_3r"],
+                "adr":         best["adr"],
+                "momentum":    best["momentum"],
+            }
+            journal["open_trade"] = trade
+            save_journal(journal)
+            print(f"*** TRADE OPENED: {trade['ticker']} @ ${trade['entry_price']:.2f} ***")
+            print(f"  Stop:    ${trade['stop_price']:.2f}  (risk: ${trade['risk']:.2f}/share)")
+            print(f"  1R target: ${trade['target_1r']:.2f}")
+            print(f"  2R target: ${trade['target_2r']:.2f}")
+            print(f"  3R target: ${trade['target_3r']:.2f}")
+            print(f"\nSaved to journal.json.")
     else:
-        trade = {
-            "ticker": best["ticker"],
-            "entry_price": best["price"],
-            "entry_date": datetime.today().strftime("%Y-%m-%d"),
-            "target_price": round(best["price"] * 1.06, 2),
-            "stop_price": round(best["price"] * 0.97, 2),
-            "rs_score": round(best["rs"], 2),
-        }
-        journal["open_trade"] = trade
-        save_journal(journal)
-        print(f"*** TRADE OPENED ***")
-        print(f"  Ticker:       {trade['ticker']}")
-        print(f"  Entry Price:  ${trade['entry_price']:.2f}")
-        print(f"  Target (+6%): ${trade['target_price']:.2f}")
-        print(f"  Stop  (-3%):  ${trade['stop_price']:.2f}")
-        print(f"  RS Score:     {trade['rs_score']:+.2f}%")
-        print(f"\nTrade saved to journal.json.")
+        print("No confirmed breakouts today. Stocks on watch are setting up — check back daily.")
 
 
 if __name__ == "__main__":
