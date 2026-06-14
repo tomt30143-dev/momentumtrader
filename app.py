@@ -21,9 +21,10 @@ WATCHLIST_FILE = os.path.join(BASE, "watchlist.txt")
 
 ADR_MIN_PCT       = 3.0
 MOMENTUM_MIN_PCT  = 30.0
-CONSOL_MAX_PCT    = 10.0
-BREAKOUT_VOL_MULT = 1.5
-CONSOL_DAYS       = 10
+CONSOL_MAX_PCT    = 12.0   # slightly wider to catch more bases
+BREAKOUT_VOL_MULT = 1.2    # lowered from 1.5 — less strict volume requirement
+NEAR_BREAKOUT_PCT = 3.0    # within 3% of the 10-day high = "Buy Soon"
+CONSOL_DAYS       = 15     # look back 15 days for consolidation
 MOMENTUM_DAYS     = 60
 ADR_DAYS          = 20
 MA_50             = 50
@@ -188,12 +189,28 @@ def scan_one(ticker):
 
     vol_dry  = float(consol["Volume"].mean()) < float(full_vol["Volume"].mean())
 
-    # Breakout check
-    today      = df.iloc[-1]
-    prior_10   = df.iloc[-(CONSOL_DAYS + 1):-1]
+    # Breakout / near-breakout check
+    # Use last 2 trading days in case today is a weekend (last row = Friday)
+    last_day   = df.iloc[-1]
+    prior_win  = df.iloc[-(CONSOL_DAYS + 1):-1]
     avg_vol    = float(df.tail(ADR_DAYS + 1).iloc[:-1]["Volume"].mean())
-    breakout   = (float(today["Close"]) > float(prior_10["High"].max()) and
-                  float(today["Volume"]) >= BREAKOUT_VOL_MULT * avg_vol)
+    prior_high = float(prior_win["High"].max())
+    last_vol   = float(last_day["Volume"])
+    last_close = float(last_day["Close"])
+
+    vol_ok    = avg_vol == 0 or last_vol >= BREAKOUT_VOL_MULT * avg_vol
+    broke_out = last_close > prior_high and vol_ok
+
+    # "Buy Soon" — within NEAR_BREAKOUT_PCT% of the prior high, even without vol
+    pct_from_high = (prior_high - last_close) / prior_high * 100
+    near_break    = not broke_out and pct_from_high <= NEAR_BREAKOUT_PCT
+
+    if broke_out:
+        signal = "BREAKOUT"
+    elif near_break:
+        signal = "BUY SOON"
+    else:
+        signal = "WATCH"
 
     risk = round(price - c_lo, 2)
     return {
@@ -203,12 +220,13 @@ def scan_one(ticker):
         "momentum":  round(mom, 1),
         "range_pct": round(rng_pct, 2),
         "vol_dry":   vol_dry,
-        "breakout":  breakout,
+        "signal":    signal,
         "stop":      round(c_lo, 2),
         "risk":      risk,
         "t1":        round(price + risk, 2),
         "t2":        round(price + 2 * risk, 2),
         "t3":        round(price + 3 * risk, 2),
+        "pct_from_high": round(pct_from_high, 1),
     }, None
 
 
@@ -499,64 +517,84 @@ elif page == "Find Stocks":
                      and s["momentum"] >= mom_min
                      and s["range_pct"] <= consol_max]
 
-        breakouts = [s for s in filtered if s["breakout"]]
-        on_watch  = sorted([s for s in filtered if not s["breakout"]], key=lambda x: x["range_pct"])
+        breakouts  = [s for s in filtered if s["signal"] == "BREAKOUT"]
+        buy_soon   = sorted([s for s in filtered if s["signal"] == "BUY SOON"],  key=lambda x: x["pct_from_high"])
+        on_watch   = sorted([s for s in filtered if s["signal"] == "WATCH"],     key=lambda x: x["range_pct"])
 
-        st.markdown(f"**Scan finished at {scan_time}** — {len(breakouts)} breakouts, {len(on_watch)} stocks on watch")
+        st.markdown(f"**Scan finished at {scan_time}** — 🚀 {len(breakouts)} breakouts &nbsp;|&nbsp; ⚡ {len(buy_soon)} buy soon &nbsp;|&nbsp; 👁 {len(on_watch)} on watch")
+
+        journal = load_journal()
+
+        def open_trade_button(s):
+            if journal.get("open_trade"):
+                st.caption(f"⚠️  Close your open {journal['open_trade']['ticker']} trade first.")
+            else:
+                if st.button(f"Open trade on {s['ticker']}", key=f"b_{s['ticker']}", type="primary"):
+                    trade = {
+                        "ticker":      s["ticker"],
+                        "entry_price": s["price"],
+                        "entry_date":  date.today().isoformat(),
+                        "stop_price":  s["stop"],
+                        "risk":        s["risk"],
+                        "t1": s["t1"], "t2": s["t2"], "t3": s["t3"],
+                        "adr": s["adr"], "momentum": s["momentum"],
+                    }
+                    journal["open_trade"] = trade
+                    save_journal(journal)
+                    st.success("Trade opened! Go to **Today's Check** to monitor it daily.")
+
+        def stock_card(s, show_open_btn=True):
+            with st.container(border=True):
+                col1, col2, col3, col4 = st.columns([2, 2, 2, 3])
+                col1.markdown(f"### {s['ticker']}")
+                col1.markdown(f"**${s['price']:.2f}**")
+                col2.metric("Daily range",   f"{s['adr']:.1f}%")
+                col2.metric("Prior uptrend", f"{s['momentum']:.0f}%")
+                col3.metric("Base width",    f"{s['range_pct']:.1f}%")
+                col3.metric("Vol drying",    "Yes ✅" if s["vol_dry"] else "No")
+                col4.markdown(f"**Stop loss:** ${s['stop']:.2f}  *(risk: ${s['risk']:.2f}/share)*")
+                col4.markdown(f"**Targets:** ${s['t1']:.2f} → ${s['t2']:.2f} → ${s['t3']:.2f}")
+                if show_open_btn:
+                    open_trade_button(s)
 
         # ── BREAKOUTS ─────────────────────────────────────────────────────────
         if breakouts:
             st.divider()
-            st.markdown("## 🚀 Breaking Out Now")
-            st.caption("These stocks crossed above their consolidation range today on high volume. Highest-quality buy signal.")
-
-            journal = load_journal()
+            st.markdown("## 🚀 Breaking Out Now — Buy Signal")
+            st.caption("Crossed above the consolidation range on strong volume. Strongest buy signal.")
             for s in breakouts:
-                with st.container(border=True):
-                    col1, col2, col3, col4 = st.columns([2, 2, 2, 3])
-                    col1.markdown(f"### {s['ticker']}")
-                    col1.markdown(f"**${s['price']:.2f}**")
-                    col2.metric("Daily range",    f"{s['adr']:.1f}%")
-                    col2.metric("Prior uptrend",  f"{s['momentum']:.0f}%")
-                    col3.metric("Base tightness", f"{s['range_pct']:.1f}%")
-                    col3.metric("Volume drying",  "Yes ✅" if s["vol_dry"] else "No")
-                    col4.markdown(f"**Stop loss:** ${s['stop']:.2f}  *(risk: ${s['risk']:.2f}/share)*")
-                    col4.markdown(f"**Targets:** ${s['t1']:.2f} → ${s['t2']:.2f} → ${s['t3']:.2f}")
+                stock_card(s)
 
-                    if journal.get("open_trade"):
-                        st.caption(f"⚠️  You already have an open trade ({journal['open_trade']['ticker']}). Close it first.")
-                    else:
-                        if st.button(f"Open trade on {s['ticker']}", key=f"b_{s['ticker']}", type="primary"):
-                            trade = {
-                                "ticker":      s["ticker"],
-                                "entry_price": s["price"],
-                                "entry_date":  date.today().isoformat(),
-                                "stop_price":  s["stop"],
-                                "risk":        s["risk"],
-                                "t1": s["t1"], "t2": s["t2"], "t3": s["t3"],
-                                "adr": s["adr"], "momentum": s["momentum"],
-                            }
-                            journal["open_trade"] = trade
-                            save_journal(journal)
-                            st.success(f"Trade opened! Go to **Today's Check** to monitor it daily.")
+        # ── BUY SOON ──────────────────────────────────────────────────────────
+        if buy_soon:
+            st.divider()
+            st.markdown("## ⚡ Within 3% of Breaking Out — Buy Soon")
+            st.caption("Right at the edge of the base. Set an alert or check back tomorrow.")
+            for s in buy_soon:
+                col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 2])
+                col1.markdown(f"**{s['ticker']}** — ${s['price']:.2f}")
+                col2.metric("Base width",  f"{s['range_pct']:.1f}%")
+                col3.metric("From breakout", f"{s['pct_from_high']:.1f}%")
+                col4.metric("Vol drying",  "Yes ✅" if s["vol_dry"] else "No")
+                col5.markdown(f"Stop ${s['stop']:.2f} &nbsp; | &nbsp; Targets ${s['t1']:.2f} → ${s['t2']:.2f} → ${s['t3']:.2f}")
 
         # ── ON WATCH ──────────────────────────────────────────────────────────
         if on_watch:
             st.divider()
-            st.markdown("## 👁  Setting Up — Check Back Soon")
-            st.caption("These stocks have the right structure but haven't broken out yet. Add them to your watchlist and check daily.")
+            st.markdown("## 👁  On Watch — Still Setting Up")
+            st.caption("Right structure, not ready yet. Come back after a few more tight days.")
             rows = []
             for s in on_watch:
                 rows.append({
-                    "Ticker":       s["ticker"],
-                    "Price":        f"${s['price']:.2f}",
-                    "Daily Move":   f"{s['adr']:.1f}%",
-                    "Prior Uptrend":f"{s['momentum']:.0f}%",
-                    "Base Width":   f"{s['range_pct']:.1f}%",
-                    "Vol Dropping": "Yes ✅" if s["vol_dry"] else "No",
+                    "Ticker":        s["ticker"],
+                    "Price":         f"${s['price']:.2f}",
+                    "Daily Move":    f"{s['adr']:.1f}%",
+                    "Prior Uptrend": f"{s['momentum']:.0f}%",
+                    "Base Width":    f"{s['range_pct']:.1f}%",
+                    "Vol Dropping":  "Yes ✅" if s["vol_dry"] else "No",
                     "Stop If Bought":f"${s['stop']:.2f}",
-                    "Target 1":     f"${s['t1']:.2f}",
-                    "Target 2":     f"${s['t2']:.2f}",
+                    "Target 1":      f"${s['t1']:.2f}",
+                    "Target 2":      f"${s['t2']:.2f}",
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
