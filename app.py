@@ -43,48 +43,11 @@ st.set_page_config(
 
 st.markdown("""
 <style>
-  /* force readable text everywhere */
-  html, body, [class*="css"] { color: #f0f0f0 !important; }
-  [data-testid="stSidebar"] { background-color: #1a1a2e; }
-  [data-testid="stSidebar"] * { color: #f0f0f0 !important; }
-  .stMarkdown, .stText, p, span, label, div { color: #f0f0f0 !important; }
-  h1, h2, h3, h4 { color: #ffffff !important; }
-  .metric-value { color: #ffffff !important; font-size: 26px !important; font-weight: 700 !important; }
-
-  /* alert boxes */
-  .alert-green {
-    background: #0d3b1e; border-left: 4px solid #00d084;
-    border-radius: 8px; padding: 16px 20px; margin: 10px 0;
-    color: #ffffff !important;
-  }
-  .alert-red {
-    background: #3b0d0d; border-left: 4px solid #ff4444;
-    border-radius: 8px; padding: 16px 20px; margin: 10px 0;
-    color: #ffffff !important;
-  }
-  .alert-yellow {
-    background: #3b2d0d; border-left: 4px solid #ffaa00;
-    border-radius: 8px; padding: 16px 20px; margin: 10px 0;
-    color: #ffffff !important;
-  }
-  .alert-blue {
-    background: #0d1f3b; border-left: 4px solid #4488ff;
-    border-radius: 8px; padding: 16px 20px; margin: 10px 0;
-    color: #ffffff !important;
-  }
-
-  /* cards */
-  .trade-card {
-    background: #1e1e2e; border-radius: 12px;
-    padding: 20px 24px; border: 1px solid #333355;
-    margin-bottom: 16px;
-  }
-
-  /* dataframe text */
-  .dataframe td, .dataframe th { color: #f0f0f0 !important; }
-
-  /* buttons */
-  .stButton > button { font-weight: 600; border-radius: 8px; }
+  .alert-green  { background:#0d3b1e; border-left:4px solid #00d084; border-radius:8px; padding:16px 20px; margin:10px 0; color:#f0f0f0; }
+  .alert-red    { background:#3b0d0d; border-left:4px solid #ff4444; border-radius:8px; padding:16px 20px; margin:10px 0; color:#f0f0f0; }
+  .alert-yellow { background:#3b2d0d; border-left:4px solid #ffaa00; border-radius:8px; padding:16px 20px; margin:10px 0; color:#f0f0f0; }
+  .alert-blue   { background:#0d1f3b; border-left:4px solid #4488ff; border-radius:8px; padding:16px 20px; margin:10px 0; color:#f0f0f0; }
+  .stButton > button { font-weight:600; border-radius:8px; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -358,7 +321,7 @@ def build_chart(ticker, entry, stop, t1, t2, t3):
 with st.sidebar:
     st.markdown("## 📈 Swing Trader")
     st.divider()
-    page = st.radio("", ["Today's Check", "Find Stocks", "Trade History"], label_visibility="collapsed")
+    page = st.radio("", ["Today's Check", "Find Stocks", "Journal"], label_visibility="collapsed")
     st.divider()
     st.caption("Based on Qullamaggie's VCP strategy")
 
@@ -628,8 +591,8 @@ elif page == "Find Stocks":
 # ═════════════════════════════════════════════════════════════════════════════
 #  PAGE 3: TRADE HISTORY
 # ═════════════════════════════════════════════════════════════════════════════
-elif page == "Trade History":
-    st.title("📓 Trade History")
+elif page == "Journal":
+    st.title("📓 Journal")
     journal = load_journal()
     trades  = journal.get("closed_trades", [])
 
