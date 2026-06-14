@@ -108,8 +108,9 @@ def save_watchlist(tickers):
 @st.cache_data(ttl=86400, show_spinner=False)
 def get_sp500():
     try:
-        tables = pd.read_html("https://en.wikipedia.org/wiki/List_of_S%26P_500_companies")
-        return sorted(tables[0]["Symbol"].str.replace(".", "-").tolist())
+        url = "https://raw.githubusercontent.com/datasets/s-and-p-500-companies/main/data/constituents.csv"
+        df  = pd.read_csv(url)
+        return sorted(df["Symbol"].str.replace(".", "-").tolist())
     except Exception:
         return []
 
