@@ -1,0 +1,22 @@
+{
+  "open_trade": {
+    "ticker": "MI",
+    "entry_price": 13.170000076293945,
+    "entry_date": "2026-06-14",
+    "target_price": 13.96,
+    "stop_price": 12.77,
+    "rs_score": 6619.04
+  },
+  "closed_trades": [
+    {
+      "ticker": "AMD",
+      "entry_price": 511.57000732421875,
+      "entry_date": "2026-06-13",
+      "exit_price": 511.57,
+      "exit_date": "2026-06-13",
+      "return_pct": -0.0,
+      "result": "LOSS",
+      "rs_score": 20.28
+    }
+  ]
+}
