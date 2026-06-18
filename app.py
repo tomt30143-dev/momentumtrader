@@ -15,9 +15,10 @@ import requests
 import streamlit as st
 import yfinance as yf
 
-BASE           = os.path.dirname(__file__)
-JOURNAL_FILE   = os.path.join(BASE, "journal.json")
-WATCHLIST_FILE = os.path.join(BASE, "watchlist.txt")
+BASE              = os.path.dirname(__file__)
+JOURNAL_FILE      = os.path.join(BASE, "journal.json")
+WATCHLIST_FILE    = os.path.join(BASE, "watchlist.txt")
+MY_WATCHLIST_FILE = os.path.join(BASE, "my_watchlist.json")
 
 ADR_MIN_PCT       = 3.0
 MOMENTUM_MIN_PCT  = 30.0
@@ -102,6 +103,34 @@ def save_watchlist(tickers):
     if not _has_supabase():
         with open(WATCHLIST_FILE, "w") as f:
             f.write("\n".join(tickers) + "\n")
+
+
+# ── my personal watchlist (my_watchlist.json / Supabase row id=2) ─────────────
+
+def _sb_mywl_url():
+    return st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/journal?id=eq.2"
+
+def load_my_watchlist():
+    if _has_supabase():
+        rows = requests.get(_sb_mywl_url(), headers=_sb_headers(), timeout=10).json()
+        return rows[0]["data"] if rows else []
+    if not os.path.exists(MY_WATCHLIST_FILE):
+        return []
+    with open(MY_WATCHLIST_FILE) as f:
+        return json.load(f)
+
+def save_my_watchlist(items):
+    """items = list of {"ticker": str, "added": str}"""
+    if _has_supabase():
+        rows = requests.get(_sb_mywl_url(), headers=_sb_headers(), timeout=10).json()
+        if rows:
+            requests.patch(_sb_mywl_url(), headers=_sb_headers(), json={"data": items}, timeout=10)
+        else:
+            requests.post(st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/journal",
+                          headers=_sb_headers(), json={"id": 2, "data": items}, timeout=10)
+        return
+    with open(MY_WATCHLIST_FILE, "w") as f:
+        json.dump(items, f, indent=2)
 
 
 # ── ticker universes ──────────────────────────────────────────────────────────
@@ -391,7 +420,7 @@ def build_chart(ticker, entry, stop, t1, t2, t3):
 with st.sidebar:
     st.markdown("## 📈 Swing Trader")
     st.divider()
-    page = st.radio("", ["Today's Check", "Find Stocks", "Journal"], label_visibility="collapsed")
+    page = st.radio("", ["Today's Check", "Find Stocks", "My Watchlist", "Journal"], label_visibility="collapsed")
     st.divider()
     st.caption("Based on Qullamaggie's VCP strategy")
 
@@ -728,7 +757,184 @@ elif page == "Find Stocks":
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-#  PAGE 3: TRADE HISTORY
+#  PAGE 3: MY WATCHLIST
+# ═════════════════════════════════════════════════════════════════════════════
+elif page == "My Watchlist":
+    st.title("⭐ My Watchlist")
+    st.caption("Your personal list of stocks to track. Separate from the scanner — add anything you're interested in.")
+
+    items = load_my_watchlist()
+    tickers_in_list = [i["ticker"] for i in items]
+
+    # ── add ticker ────────────────────────────────────────────────────────────
+    col1, col2 = st.columns([4, 1])
+    new_t = col1.text_input("", placeholder="Type a ticker to add, e.g. PLTR",
+                            label_visibility="collapsed").upper().strip()
+    if col2.button("Add to Watchlist", type="primary", use_container_width=True) and new_t:
+        if new_t in tickers_in_list:
+            st.warning(f"{new_t} is already in your watchlist.")
+        else:
+            items.append({"ticker": new_t, "added": date.today().isoformat()})
+            save_my_watchlist(items)
+            st.success(f"{new_t} added.")
+            st.rerun()
+
+    # ── current list ──────────────────────────────────────────────────────────
+    if not items:
+        st.info("Your watchlist is empty. Add some tickers above to get started.")
+    else:
+        st.divider()
+
+        # ── run scan button ───────────────────────────────────────────────────
+        run_btn = st.button("🔍  Run Watchlist Scan", type="primary", use_container_width=True)
+
+        if run_btn:
+            results = {}
+            prog = st.progress(0.0)
+            stat = st.empty()
+            for i, item in enumerate(items):
+                t = item["ticker"]
+                prog.progress((i + 1) / len(items))
+                stat.text(f"Scanning {t}... ({i+1}/{len(items)})")
+                result, _ = scan_one(t)
+                if result:
+                    result["score"] = score_stock(result)
+                results[t] = {
+                    "result":      result,
+                    "scanned_at":  datetime.now().strftime("%I:%M %p"),
+                }
+            prog.progress(1.0)
+            stat.text("Done.")
+            st.session_state["mywl_results"] = results
+
+        # ── show saved list with remove buttons ───────────────────────────────
+        if "mywl_results" not in st.session_state:
+            st.markdown("### Your stocks")
+            rows = []
+            for item in items:
+                rows.append({"Ticker": item["ticker"], "Added": item["added"]})
+            df_list = pd.DataFrame(rows)
+
+            for i, item in enumerate(items):
+                c1, c2 = st.columns([5, 1])
+                c1.markdown(f"**{item['ticker']}** — added {item['added']}")
+                if c2.button("Remove", key=f"rm_mywl_{item['ticker']}_{i}"):
+                    items = [x for x in items if x["ticker"] != item["ticker"]]
+                    save_my_watchlist(items)
+                    if "mywl_results" in st.session_state:
+                        del st.session_state["mywl_results"]
+                    st.rerun()
+
+        # ── scan results ──────────────────────────────────────────────────────
+        else:
+            results = st.session_state["mywl_results"]
+
+            def momentum_status(score):
+                if score >= 80:   return "🔥 BREAKING OUT"
+                elif score >= 60: return "⚡ Getting Close"
+                elif score >= 40: return "👀 Still Setting Up"
+                elif score >= 20: return "📉 Losing Steam"
+                else:             return "❌ Broken"
+
+            def row_color(score):
+                if score >= 60:   return "background-color: #0d3b1e"
+                elif score >= 40: return "background-color: #3b2d0d"
+                else:             return "background-color: #3b0d0d"
+
+            # build rows
+            rows = []
+            for item in items:
+                t   = item["ticker"]
+                res = results.get(t, {})
+                r   = res.get("result")
+                scanned_at = res.get("scanned_at", "—")
+
+                if r:
+                    pfh = r.get("pct_from_high", None)
+                    rows.append({
+                        "_score":          r["score"],
+                        "Ticker":          t,
+                        "Price":           f"${r['price']:.2f}",
+                        "Score":           r["score"],
+                        "Status":          momentum_status(r["score"]),
+                        "ADR%":            f"{r['adr']:.1f}%",
+                        "Prior Uptrend":   f"{r['momentum']:.0f}%",
+                        "Base Width":      f"{r['range_pct']:.1f}%",
+                        "Vol Dropping":    "Yes ✅" if r["vol_dry"] else "No",
+                        "From Breakout":   f"{pfh:.1f}%" if pfh is not None else "—",
+                        "Stop If Bought":  f"${r['stop']:.2f}",
+                        "Target 1":        f"${r['t1']:.2f}",
+                        "Target 2":        f"${r['t2']:.2f}",
+                        "Last Scanned":    scanned_at,
+                        "Added":           item["added"],
+                    })
+                else:
+                    rows.append({
+                        "_score":         -1,
+                        "Ticker":          t,
+                        "Price":           "—",
+                        "Score":           "—",
+                        "Status":          "❌ No data",
+                        "ADR%":            "—",
+                        "Prior Uptrend":   "—",
+                        "Base Width":      "—",
+                        "Vol Dropping":    "—",
+                        "From Breakout":   "—",
+                        "Stop If Bought":  "—",
+                        "Target 1":        "—",
+                        "Target 2":        "—",
+                        "Last Scanned":    scanned_at,
+                        "Added":           item["added"],
+                    })
+
+            rows.sort(key=lambda x: x["_score"] if isinstance(x["_score"], int) else -1, reverse=True)
+
+            # summary line
+            hot   = sum(1 for r in rows if isinstance(r["_score"], int) and r["_score"] >= 60)
+            setup = sum(1 for r in rows if isinstance(r["_score"], int) and 40 <= r["_score"] < 60)
+            cold  = sum(1 for r in rows if isinstance(r["_score"], int) and r["_score"] < 40)
+            st.markdown(f"**{hot} getting close or breaking out &nbsp;|&nbsp; {setup} still setting up &nbsp;|&nbsp; {cold} losing steam or broken**")
+            st.divider()
+
+            # table (drop internal sort key)
+            display_cols = ["Ticker","Price","Score","Status","ADR%","Prior Uptrend",
+                            "Base Width","Vol Dropping","From Breakout",
+                            "Stop If Bought","Target 1","Target 2","Last Scanned","Added"]
+            df = pd.DataFrame(rows)[display_cols]
+
+            def highlight_row(row):
+                try:
+                    score = int(row["Score"])
+                except (ValueError, TypeError):
+                    return [""] * len(row)
+                if score >= 60:
+                    bg = "background-color: #0d3b1e"
+                elif score >= 40:
+                    bg = "background-color: #2d2500"
+                else:
+                    bg = "background-color: #2d0a0a"
+                return [bg] * len(row)
+
+            st.dataframe(
+                df.style.apply(highlight_row, axis=1),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            # remove buttons below table
+            st.divider()
+            st.markdown("**Remove from watchlist:**")
+            cols = st.columns(6)
+            for i, item in enumerate(items):
+                if cols[i % 6].button(f"✕ {item['ticker']}", key=f"rm2_mywl_{item['ticker']}_{i}", use_container_width=True):
+                    items = [x for x in items if x["ticker"] != item["ticker"]]
+                    save_my_watchlist(items)
+                    del st.session_state["mywl_results"]
+                    st.rerun()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+#  PAGE 4: TRADE HISTORY
 # ═════════════════════════════════════════════════════════════════════════════
 elif page == "Journal":
     st.title("📓 Journal")
