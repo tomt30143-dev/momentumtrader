@@ -286,6 +286,57 @@ def daily_check(ticker, entry_price, entry_date_str):
         return None
 
 
+# ── scoring ───────────────────────────────────────────────────────────────────
+
+def score_stock(s):
+    score = 0
+
+    # Prior uptrend
+    if s["momentum"] >= 100:   score += 30
+    elif s["momentum"] >= 60:  score += 20
+    else:                      score += 10   # 30-60%
+
+    # ADR
+    if s["adr"] >= 7:          score += 25
+    elif s["adr"] >= 5:        score += 20
+    else:                      score += 10   # 3-5%
+
+    # Volume drying up
+    if s["vol_dry"]:           score += 20
+
+    # Base width
+    if s["range_pct"] < 8:     score += 20
+    elif s["range_pct"] <= 10: score += 10
+    else:                      score += 5    # 10-12%
+
+    # Distance from breakout level
+    pfh = s.get("pct_from_high", 999)
+    if pfh < 1:                score += 25
+    elif pfh <= 2:             score += 15
+    elif pfh <= 3:             score += 5
+
+    # Target 1 at least 5% above entry
+    upside = (s["t1"] - s["price"]) / s["price"] * 100 if s["price"] else 0
+    if upside >= 5:            score += 10
+
+    return score
+
+
+def hard_disqualify(s):
+    """Return a reason string if the stock should be removed, else None."""
+    if s["price"] < 5:
+        return f"price ${s['price']:.2f} under $5"
+    if s["range_pct"] > 12:
+        return f"base too wide ({s['range_pct']:.1f}%)"
+    if s["momentum"] < 30:
+        return f"prior move too small ({s['momentum']:.0f}%)"
+    if s["adr"] < 3:
+        return f"ADR too low ({s['adr']:.1f}%)"
+    if not s["vol_dry"] and s.get("pct_from_high", 999) > 1.5:
+        return "volume not drying up and not close enough to breakout"
+    return None
+
+
 # ── chart ─────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600, show_spinner=False)
@@ -517,11 +568,27 @@ elif page == "Find Stocks":
                      and s["momentum"] >= mom_min
                      and s["range_pct"] <= consol_max]
 
-        breakouts  = [s for s in filtered if s["signal"] == "BREAKOUT"]
-        buy_soon   = sorted([s for s in filtered if s["signal"] == "BUY SOON"],  key=lambda x: x["pct_from_high"])
-        on_watch   = sorted([s for s in filtered if s["signal"] == "WATCH"],     key=lambda x: x["range_pct"])
+        # ── apply hard disqualifiers + scoring ───────────────────────────────
+        scored = []
+        dq_extra = []
+        for s in filtered:
+            reason = hard_disqualify(s)
+            if reason:
+                dq_extra.append((s["ticker"], reason))
+            else:
+                s["score"] = score_stock(s)
+                scored.append(s)
 
-        st.markdown(f"**Scan finished at {scan_time}** — 🚀 {len(breakouts)} breakouts &nbsp;|&nbsp; ⚡ {len(buy_soon)} buy soon &nbsp;|&nbsp; 👁 {len(on_watch)} on watch")
+        breakouts = sorted([s for s in scored if s["signal"] == "BREAKOUT"], key=lambda x: -x["score"])
+        buy_soon  = sorted([s for s in scored if s["signal"] == "BUY SOON"],  key=lambda x: -x["score"])
+        on_watch  = sorted([s for s in scored if s["signal"] == "WATCH"],     key=lambda x: -x["score"])[:10]
+
+        st.markdown(
+            f"**Scan finished at {scan_time}** — "
+            f"🚀 {len(breakouts)} breakouts &nbsp;|&nbsp; "
+            f"⚡ {len(buy_soon)} buy soon &nbsp;|&nbsp; "
+            f"👁 {len(on_watch)} on watch (top 10)"
+        )
 
         journal = load_journal()
 
@@ -543,49 +610,72 @@ elif page == "Find Stocks":
                     save_journal(journal)
                     st.success("Trade opened! Go to **Today's Check** to monitor it daily.")
 
-        def stock_card(s, show_open_btn=True):
+        def stock_card(s, rank=None):
             with st.container(border=True):
                 col1, col2, col3, col4 = st.columns([2, 2, 2, 3])
-                col1.markdown(f"### {s['ticker']}")
-                col1.markdown(f"**${s['price']:.2f}**")
+                label = f"#{rank} — {s['ticker']}" if rank else s["ticker"]
+                col1.markdown(f"### {label}")
+                col1.markdown(f"**${s['price']:.2f}** &nbsp; Score: **{s['score']}/100**")
                 col2.metric("Daily range",   f"{s['adr']:.1f}%")
                 col2.metric("Prior uptrend", f"{s['momentum']:.0f}%")
                 col3.metric("Base width",    f"{s['range_pct']:.1f}%")
                 col3.metric("Vol drying",    "Yes ✅" if s["vol_dry"] else "No")
                 col4.markdown(f"**Stop loss:** ${s['stop']:.2f}  *(risk: ${s['risk']:.2f}/share)*")
-                col4.markdown(f"**Targets:** ${s['t1']:.2f} → ${s['t2']:.2f} → ${s['t3']:.2f}")
-                if show_open_btn:
-                    open_trade_button(s)
+                col4.markdown(f"**Target 1:** ${s['t1']:.2f} &nbsp; **Target 2:** ${s['t2']:.2f} &nbsp; **Target 3:** ${s['t3']:.2f}")
+                open_trade_button(s)
+
+        # ── THE BUY — top scored breakout or buy-soon ─────────────────────────
+        st.divider()
+        candidates = (breakouts + buy_soon)[:1]
+        top = candidates[0] if candidates else None
+
+        if top and top["score"] >= 60:
+            st.markdown(f"""
+            <div class="alert-green">
+            <b style="font-size:22px">🏆 THE BUY THIS WEEK — {top['ticker']}</b><br><br>
+            Score: <b>{top['score']}/100</b> &nbsp;|&nbsp;
+            Price: <b>${top['price']:.2f}</b> &nbsp;|&nbsp;
+            Stop loss: <b>${top['stop']:.2f}</b><br>
+            Target 1: <b>${top['t1']:.2f}</b> &nbsp;|&nbsp;
+            Target 2: <b>${top['t2']:.2f}</b> &nbsp;|&nbsp;
+            Risk per share: <b>${top['risk']:.2f}</b>
+            </div>
+            """, unsafe_allow_html=True)
+            st.markdown("")
+            open_trade_button(top)
+        else:
+            st.markdown("""
+            <div class="alert-yellow">
+            <b style="font-size:18px">⏸ NO TRADE THIS WEEK</b><br>
+            No stock scored above 60/100. Wait for a better setup rather than forcing a trade.
+            </div>
+            """, unsafe_allow_html=True)
 
         # ── BREAKOUTS ─────────────────────────────────────────────────────────
         if breakouts:
             st.divider()
-            st.markdown("## 🚀 Breaking Out Now — Buy Signal")
-            st.caption("Crossed above the consolidation range on strong volume. Strongest buy signal.")
-            for s in breakouts:
-                stock_card(s)
+            st.markdown("## 🚀 Breaking Out Now")
+            st.caption("Crossed above the consolidation range on volume. Highest-quality signal.")
+            for i, s in enumerate(breakouts, 1):
+                stock_card(s, rank=i)
 
-        # ── BUY SOON ──────────────────────────────────────────────────────────
+        # ── BUY SOON — top 3 only ─────────────────────────────────────────────
         if buy_soon:
             st.divider()
-            st.markdown("## ⚡ Within 3% of Breaking Out — Buy Soon")
-            st.caption("Right at the edge of the base. Set an alert or check back tomorrow.")
-            for s in buy_soon:
-                col1, col2, col3, col4, col5 = st.columns([2, 1, 1, 1, 2])
-                col1.markdown(f"**{s['ticker']}** — ${s['price']:.2f}")
-                col2.metric("Base width",  f"{s['range_pct']:.1f}%")
-                col3.metric("From breakout", f"{s['pct_from_high']:.1f}%")
-                col4.metric("Vol drying",  "Yes ✅" if s["vol_dry"] else "No")
-                col5.markdown(f"Stop ${s['stop']:.2f} &nbsp; | &nbsp; Targets ${s['t1']:.2f} → ${s['t2']:.2f} → ${s['t3']:.2f}")
+            st.markdown("## ⚡ Top 3 — Within 3% of Breaking Out")
+            st.caption("Right at the edge of the base, ranked by score. Check back tomorrow.")
+            for i, s in enumerate(buy_soon[:3], 1):
+                stock_card(s, rank=i)
 
-        # ── ON WATCH ──────────────────────────────────────────────────────────
+        # ── ON WATCH — top 10 as table ────────────────────────────────────────
         if on_watch:
             st.divider()
-            st.markdown("## 👁  On Watch — Still Setting Up")
-            st.caption("Right structure, not ready yet. Come back after a few more tight days.")
+            st.markdown("## 👁  On Watch — Top 10 by Score")
+            st.caption("Good structure but not ready yet.")
             rows = []
             for s in on_watch:
                 rows.append({
+                    "Score":         s["score"],
                     "Ticker":        s["ticker"],
                     "Price":         f"${s['price']:.2f}",
                     "Daily Move":    f"{s['adr']:.1f}%",
@@ -601,8 +691,9 @@ elif page == "Find Stocks":
         if not filtered:
             st.info("No stocks passed the filters. Try loosening the sliders, or add more tickers to your watchlist.")
 
-        with st.expander(f"See why stocks were filtered out ({len(rejected)} rejected)"):
-            for t, reason in rejected:
+        all_rejected = rejected + dq_extra
+        with st.expander(f"See why stocks were filtered out ({len(all_rejected)} rejected)"):
+            for t, reason in all_rejected:
                 st.caption(f"**{t}** — {reason}")
 
     # ── watchlist manager ─────────────────────────────────────────────────────
