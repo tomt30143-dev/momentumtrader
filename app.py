@@ -698,6 +698,8 @@ elif page == "Find Stocks":
             """, unsafe_allow_html=True)
             st.markdown("")
             open_trade_button(top)
+            # mark this ticker's button as used so stock_card doesn't create a duplicate
+            _btn_keys_used.add(f"b_{top['ticker']}")
         else:
             st.markdown("""
             <div class="alert-yellow">
@@ -755,10 +757,15 @@ elif page == "Find Stocks":
     st.divider()
     st.markdown("### Your Watchlist")
     wl = load_watchlist()
-    col1, col2 = st.columns([3, 1])
-    new_t = col1.text_input("", placeholder="Add a ticker, e.g. PLTR", label_visibility="collapsed").upper().strip()
-    if col2.button("Add", use_container_width=True) and new_t:
-        if new_t not in wl:
+    with st.form("add_scanner_wl", clear_on_submit=True):
+        col1, col2 = st.columns([3, 1])
+        new_t = col1.text_input("", placeholder="Add a ticker, e.g. PLTR", label_visibility="collapsed")
+        add_submitted = col2.form_submit_button("Add", use_container_width=True)
+    if add_submitted:
+        new_t = new_t.upper().strip()
+        if not new_t:
+            st.warning("Enter a ticker first.")
+        elif new_t not in wl:
             wl.append(new_t)
             save_watchlist(wl)
             st.success(f"{new_t} added.")
