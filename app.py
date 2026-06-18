@@ -161,6 +161,103 @@ def get_sp500():
         return []
 
 @st.cache_data(ttl=86400, show_spinner=False)
+def get_nasdaq100():
+    try:
+        tables = pd.read_html("https://en.wikipedia.org/wiki/Nasdaq-100", attrs={"id": "constituents"})
+        df = tables[0]
+        col = next((c for c in df.columns if c.lower() in ("ticker", "symbol")), None)
+        if col:
+            return sorted(df[col].dropna().str.replace(".", "-").tolist())
+    except Exception:
+        pass
+    # Hardcoded fallback (as of mid-2025)
+    return sorted([
+        "AAPL","ABNB","ADBE","ADI","ADP","ADSK","AEP","AMAT","AMD","AMGN","AMZN","ANSS","ARM",
+        "ASML","AVGO","AZN","BIIB","BKNG","BKR","CCEP","CDNS","CDW","CEG","CHTR","CMCSA","COST",
+        "CPRT","CRWD","CSCO","CSGP","CSX","CTAS","CTSH","DASH","DDOG","DLTR","DXCM","EA","EXC",
+        "FANG","FAST","FTNT","GEHC","GFS","GILD","GOOG","GOOGL","HON","IDXX","ILMN","INTC","INTU",
+        "ISRG","KDP","KHC","KLAC","LRCX","LULU","MAR","MCHP","MDLZ","MELI","META","MNST","MRNA",
+        "MRVL","MSFT","MU","NFLX","NVDA","NXPI","ODFL","ON","ORLY","PANW","PAYX","PCAR","PDD",
+        "PEP","PLTR","PYPL","QCOM","REGN","ROP","ROST","SBUX","SMCI","SNPS","SPLK","TEAM","TMUS",
+        "TSLA","TTD","TXN","VRSK","VRTX","WBA","WBD","WDAY","XEL","ZS",
+    ])
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_dow30():
+    return sorted([
+        "AAPL","AMGN","AXP","BA","CAT","CRM","CSCO","CVX","DIS","DOW",
+        "GS","HD","HON","IBM","JNJ","JPM","KO","MCD","MMM","MRK",
+        "MSFT","NKE","PG","SHW","TRV","UNH","V","VZ","WMT","AMZN",
+    ])
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_russell2000():
+    """Curated ~120 liquid small-caps representative of the Russell 2000."""
+    return sorted([
+        # Financials / Banks
+        "WSFS","CVBF","FFIN","HOMB","IBCP","PRSP","HTLF","PACW","BANR","TOWN",
+        # Technology
+        "SMTC","QLYS","RDWR","POWI","FORM","LBAI","CEVA","NTGR","DAKT","MTRX",
+        "ACMR","ICHR","MKSI","NOVT","PMTS","TRMK","CRUS","AMBA","SLAB","NPKI",
+        # Healthcare / Biotech
+        "NARI","ATRC","ACCD","AMED","PGNY","ADUS","LFST","HALO","INVA","FWRD",
+        "AXSM","PRTA","HRMY","SNDX","MDXG","ESTA","HAFC","GKOS","NMRD","ONEM",
+        # Consumer
+        "WING","CAVA","TXRH","EAT","JACK","CAKE","CBRL","DENN","RUTH","FWRG",
+        "CHUY","SHAK","STKS","BJ","HIBB","BOOT","RCUS","BURL","PRPL","FLXS",
+        # Industrials
+        "KFRC","HSII","HURN","MYR","EXPO","CRAI","MGRC","ARCB","SAIA","ECHO",
+        "MRTN","PTSI","ODFL","PNTM","HTLD","CVLG","UHAL","LSTR","WERN","JBHT",
+        # Energy
+        "SM","RRC","CNX","SWN","CIVI","MGY","MTDR","ESTE","REI","TALO",
+        # Real Estate
+        "NXRT","PLYM","ILPT","INDP","STAG","UE","ALEX","SITC","ROIC","GMRE",
+        # Other
+        "REZI","LMB","RCII","GIII","CATO","BCRX","TTGT","MFIN","BSVN","WTFC",
+    ])
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def get_sector(name):
+    sectors = {
+        "Technology": [
+            "AAPL","MSFT","NVDA","AVGO","META","GOOGL","AMZN","TSLA","AMD","INTC",
+            "ORCL","CRM","ADBE","QCOM","TXN","AMAT","MU","LRCX","KLAC","MCHP",
+            "NOW","SNOW","PLTR","NET","CRWD","ZS","PANW","FTNT","DDOG","TTD",
+        ],
+        "Healthcare": [
+            "UNH","JNJ","LLY","ABBV","MRK","TMO","ABT","DHR","BMY","AMGN",
+            "GILD","VRTX","REGN","ISRG","CI","CVS","HUM","MDT","BSX","SYK",
+            "EW","IQV","DXCM","IDXX","GEHC","PODD","HOLX","MASI","ALGN","ZBH",
+        ],
+        "Financials": [
+            "JPM","BAC","WFC","GS","MS","BLK","C","AXP","CB","MMC",
+            "AON","PNC","USB","TFC","COF","SPGI","MCO","ICE","CME","SCHW",
+            "BK","STT","PRU","MET","AIG","AFL","ALL","PGR","HIG","TRV",
+        ],
+        "Energy": [
+            "XOM","CVX","COP","EOG","SLB","MPC","PSX","VLO","PXD","OXY",
+            "HAL","BKR","FANG","DVN","HES","APA","MRO","CTRA","MTDR","PR",
+            "RRC","CNX","SM","TALO","MGY","NOG","CIVI","CHX","NE","VAL",
+        ],
+        "Consumer Discretionary": [
+            "AMZN","TSLA","HD","MCD","NKE","SBUX","TJX","BKNG","LOW","CMG",
+            "GM","F","ABNB","MAR","HLT","RCL","CCL","NCLH","DHI","LEN",
+            "PHM","ROST","ORLY","AZO","DG","DLTR","BBY","EBAY","ETSY","W",
+        ],
+        "Industrials": [
+            "HON","UPS","RTX","CAT","DE","BA","LMT","GE","MMM","EMR",
+            "ITW","PH","ETN","ROK","AME","XYL","CARR","OTIS","CSX","NSC",
+            "UNP","FDX","DAL","UAL","AAL","GD","NOC","LHX","TDG","CTAS",
+        ],
+        "Real Estate": [
+            "PLD","AMT","EQIX","CCI","PSA","EQR","AVB","O","SPG","VTR",
+            "WELL","DLR","SBAC","ARE","BXP","KIM","REG","FRT","HST","IRM",
+            "ESS","CPT","MAA","UDR","NNN","WPC","STAG","VICI","GLPI","RHP",
+        ],
+    }
+    return sorted(sectors.get(name, []))
+
+@st.cache_data(ttl=86400, show_spinner=False)
 def get_full_market():
     tickers = set()
     for url in [NASDAQ_URL, OTHER_URL]:
@@ -173,6 +270,24 @@ def get_full_market():
         except Exception:
             pass
     return sorted(tickers)
+
+
+UNIVERSE_OPTIONS = [
+    "My Watchlist",
+    "S&P 500 (~5 min)",
+    "Nasdaq 100 (~2 min)",
+    "Dow Jones 30 (fast)",
+    "Russell 2000 — Small Caps (~3 min)",
+    "── Sectors ──",
+    "Technology Sector",
+    "Healthcare Sector",
+    "Financials Sector",
+    "Energy Sector",
+    "Consumer Discretionary Sector",
+    "Industrials Sector",
+    "Real Estate Sector",
+    "Full US Market (~20 min)",
+]
 
 
 # ── data helpers ──────────────────────────────────────────────────────────────
@@ -556,11 +671,16 @@ elif page == "Find Stocks":
 
     # ── universe selector ─────────────────────────────────────────────────────
     st.markdown("### What do you want to scan?")
-    universe = st.radio("", [
-        "My Watchlist",
-        "S&P 500 (500 large US stocks, ~5 min)",
-        "Full US Market (6,000+ stocks, ~20 min)",
-    ], label_visibility="collapsed")
+    universe = st.selectbox(
+        "",
+        UNIVERSE_OPTIONS,
+        label_visibility="collapsed",
+        format_func=lambda x: x,
+    )
+    # Divider rows are not selectable — nudge user past them
+    if universe == "── Sectors ──":
+        st.info("Select a specific sector from the dropdown.")
+        st.stop()
 
     # ── filters (collapsible) ─────────────────────────────────────────────────
     with st.expander("⚙️  Filters (optional — defaults work well)"):
@@ -577,28 +697,52 @@ elif page == "Find Stocks":
     run_btn = st.button("▶  Run Scan", type="primary", use_container_width=True)
 
     if run_btn:
-        if "Watchlist" in universe:
-            tickers = load_watchlist()
-        elif "S&P 500" in universe:
+        SECTOR_NAMES = [
+            "Technology", "Healthcare", "Financials", "Energy",
+            "Consumer Discretionary", "Industrials", "Real Estate",
+        ]
+
+        if universe == "My Watchlist":
+            tickers    = load_watchlist()
+            univ_label = f"My Watchlist"
+        elif universe.startswith("S&P 500"):
             with st.spinner("Loading S&P 500 list..."):
                 tickers = get_sp500()
             if not tickers:
                 st.error("Couldn't load S&P 500 list. Check your internet connection.")
                 st.stop()
-        else:
+            univ_label = "S&P 500"
+        elif universe.startswith("Nasdaq 100"):
+            with st.spinner("Loading Nasdaq 100 list..."):
+                tickers = get_nasdaq100()
+            univ_label = "Nasdaq 100"
+        elif universe.startswith("Dow Jones"):
+            tickers    = get_dow30()
+            univ_label = "Dow Jones 30"
+        elif universe.startswith("Russell 2000"):
+            tickers    = get_russell2000()
+            univ_label = "Russell 2000 Small Caps"
+        elif universe.startswith("Full US Market"):
             with st.spinner("Loading full US market list (~6,000 stocks)..."):
                 tickers = get_full_market()
             if not tickers:
                 st.error("Couldn't load market list. Check your internet connection.")
                 st.stop()
+            univ_label = "Full US Market"
+        else:
+            # Sector — strip " Sector" suffix to get the key
+            sector_key = universe.replace(" Sector", "")
+            tickers    = get_sector(sector_key)
+            univ_label = f"{sector_key} Sector"
 
-        st.info(f"Scanning {len(tickers)} stocks...")
+        st.info(f"Scanning: **{univ_label}** ({len(tickers)} tickers)")
         progress_bar = st.progress(0.0)
         status_text  = st.empty()
         passing, rejected = run_scan(tickers, progress_bar, status_text)
-        st.session_state["passing"]  = passing
-        st.session_state["rejected"] = rejected
-        st.session_state["scan_time"] = datetime.now().strftime("%I:%M %p")
+        st.session_state["passing"]    = passing
+        st.session_state["rejected"]   = rejected
+        st.session_state["scan_time"]  = datetime.now().strftime("%I:%M %p")
+        st.session_state["univ_label"] = f"{univ_label} ({len(tickers)} tickers)"
 
     # ── results ───────────────────────────────────────────────────────────────
     if "passing" in st.session_state:
@@ -628,8 +772,9 @@ elif page == "Find Stocks":
         buy_soon  = sorted([s for s in scored if s["signal"] == "BUY SOON"],  key=lambda x: -x["score"])
         on_watch  = sorted([s for s in scored if s["signal"] == "WATCH"],     key=lambda x: -x["score"])[:10]
 
+        univ_label = st.session_state.get("univ_label", "")
         st.markdown(
-            f"**Scan finished at {scan_time}** — "
+            f"**Scanning: {univ_label}** &nbsp;·&nbsp; finished at {scan_time}  \n"
             f"🚀 {len(breakouts)} breakouts &nbsp;|&nbsp; "
             f"⚡ {len(buy_soon)} buy soon &nbsp;|&nbsp; "
             f"👁 {len(on_watch)} on watch (top 10)"
