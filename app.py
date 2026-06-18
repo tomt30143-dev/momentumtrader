@@ -592,11 +592,20 @@ elif page == "Find Stocks":
 
         journal = load_journal()
 
+        _btn_keys_used = set()
+
         def open_trade_button(s):
             if journal.get("open_trade"):
                 st.caption(f"⚠️  Close your open {journal['open_trade']['ticker']} trade first.")
             else:
-                if st.button(f"Open trade on {s['ticker']}", key=f"b_{s['ticker']}", type="primary"):
+                base_key = f"b_{s['ticker']}"
+                key = base_key
+                suffix = 0
+                while key in _btn_keys_used:
+                    suffix += 1
+                    key = f"{base_key}_{suffix}"
+                _btn_keys_used.add(key)
+                if st.button(f"Open trade on {s['ticker']}", key=key, type="primary"):
                     trade = {
                         "ticker":      s["ticker"],
                         "entry_price": s["price"],
