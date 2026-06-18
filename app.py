@@ -960,11 +960,12 @@ elif page == "My Watchlist":
                 t = item["ticker"]
                 prog.progress((i + 1) / len(items))
                 stat.text(f"Scanning {t}... ({i+1}/{len(items)})")
-                result, _ = scan_one(t)
+                result, reason = scan_one(t)
                 if result:
                     result["score"] = score_stock(result)
                 results[t] = {
                     "result":      result,
+                    "reason":      reason or "",
                     "scanned_at":  datetime.now().strftime("%I:%M %p"),
                 }
             prog.progress(1.0)
@@ -1033,12 +1034,19 @@ elif page == "My Watchlist":
                         "Added":           item["added"],
                     })
                 else:
+                    reason_str = res.get("reason", "")
+                    if not reason_str:
+                        status_str = "❌ No data from Yahoo Finance"
+                    elif "not enough data" in reason_str:
+                        status_str = "❌ Invalid or delisted ticker"
+                    else:
+                        status_str = f"⛔ {reason_str}"
                     rows.append({
                         "_score":         -1,
                         "Ticker":          t,
                         "Price":           "—",
                         "Score":           "—",
-                        "Status":          "❌ No data",
+                        "Status":          status_str,
                         "ADR%":            "—",
                         "Prior Uptrend":   "—",
                         "Base Width":      "—",
