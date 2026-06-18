@@ -273,7 +273,6 @@ def get_full_market():
 
 
 UNIVERSE_OPTIONS = [
-    "My Watchlist",
     "S&P 500 (~5 min)",
     "Nasdaq 100 (~2 min)",
     "Dow Jones 30 (fast)",
@@ -702,10 +701,7 @@ elif page == "Find Stocks":
             "Consumer Discretionary", "Industrials", "Real Estate",
         ]
 
-        if universe == "My Watchlist":
-            tickers    = load_watchlist()
-            univ_label = f"My Watchlist"
-        elif universe.startswith("S&P 500"):
+        if universe.startswith("S&P 500"):
             with st.spinner("Loading S&P 500 list..."):
                 tickers = get_sp500()
             if not tickers:
