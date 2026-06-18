@@ -753,31 +753,6 @@ elif page == "Find Stocks":
             for t, reason in all_rejected:
                 st.caption(f"**{t}** — {reason}")
 
-    # ── watchlist manager ─────────────────────────────────────────────────────
-    st.divider()
-    st.markdown("### Your Watchlist")
-    wl = load_watchlist()
-    with st.form("add_scanner_wl", clear_on_submit=True):
-        col1, col2 = st.columns([3, 1])
-        new_t = col1.text_input("", placeholder="Add a ticker, e.g. PLTR", label_visibility="collapsed")
-        add_submitted = col2.form_submit_button("Add", use_container_width=True)
-    if add_submitted:
-        new_t = new_t.upper().strip()
-        if not new_t:
-            st.warning("Enter a ticker first.")
-        elif new_t not in wl:
-            wl.append(new_t)
-            save_watchlist(wl)
-            st.success(f"{new_t} added.")
-        else:
-            st.warning(f"{new_t} is already in your list.")
-
-    cols = st.columns(6)
-    for i, t in enumerate(wl):
-        if cols[i % 6].button(f"✕  {t}", key=f"rm_{t}", use_container_width=True):
-            wl.remove(t)
-            save_watchlist(wl)
-            st.rerun()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -791,22 +766,25 @@ elif page == "My Watchlist":
     tickers_in_list = [i["ticker"] for i in items]
 
     # ── add ticker ────────────────────────────────────────────────────────────
-    with st.form("add_to_mywl", clear_on_submit=True):
+    # NOTE: logic is inside the form so widget values are readable on submit.
+    # clear_on_submit is intentionally NOT used — it resets values before the
+    # handler runs, making new_t always empty.
+    with st.form("add_to_mywl"):
         col1, col2 = st.columns([4, 1])
-        new_t = col1.text_input("", placeholder="Type a ticker to add, e.g. PLTR",
+        new_t = col1.text_input("", placeholder="Type a ticker, e.g. PLTR",
                                 label_visibility="collapsed")
         submitted = col2.form_submit_button("Add to Watchlist", type="primary", use_container_width=True)
-    if submitted:
-        new_t = new_t.upper().strip()
-        if not new_t:
-            st.warning("Enter a ticker symbol first.")
-        elif new_t in tickers_in_list:
-            st.warning(f"{new_t} is already in your watchlist.")
-        else:
-            items.append({"ticker": new_t, "added": date.today().isoformat()})
-            save_my_watchlist(items)
-            st.success(f"{new_t} added.")
-            st.rerun()
+        if submitted:
+            ticker_to_add = new_t.upper().strip()
+            if not ticker_to_add:
+                st.warning("Enter a ticker symbol first.")
+            elif ticker_to_add in tickers_in_list:
+                st.warning(f"{ticker_to_add} is already in your watchlist.")
+            else:
+                items.append({"ticker": ticker_to_add, "added": date.today().isoformat()})
+                save_my_watchlist(items)
+                st.success(f"{ticker_to_add} added.")
+                st.rerun()
 
     # ── current list ──────────────────────────────────────────────────────────
     if not items:
