@@ -110,27 +110,43 @@ def save_watchlist(tickers):
 def _sb_mywl_url():
     return st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/journal?id=eq.2"
 
-def load_my_watchlist():
+def _load_my_watchlist_from_storage():
+    """Read from Supabase or local file — used only on first load."""
     if _has_supabase():
-        rows = requests.get(_sb_mywl_url(), headers=_sb_headers(), timeout=10).json()
-        return rows[0]["data"] if rows else []
+        try:
+            rows = requests.get(_sb_mywl_url(), headers=_sb_headers(), timeout=10).json()
+            return rows[0]["data"] if rows else []
+        except Exception:
+            return []
     if not os.path.exists(MY_WATCHLIST_FILE):
         return []
     with open(MY_WATCHLIST_FILE) as f:
         return json.load(f)
 
+def load_my_watchlist():
+    """Return watchlist from session state (instant) — load from storage once per session."""
+    if "mywl_items" not in st.session_state:
+        st.session_state["mywl_items"] = _load_my_watchlist_from_storage()
+    return st.session_state["mywl_items"]
+
 def save_my_watchlist(items):
-    """items = list of {"ticker": str, "added": str}"""
-    if _has_supabase():
-        rows = requests.get(_sb_mywl_url(), headers=_sb_headers(), timeout=10).json()
-        if rows:
-            requests.patch(_sb_mywl_url(), headers=_sb_headers(), json={"data": items}, timeout=10)
+    """Write to session state immediately, then persist to storage."""
+    st.session_state["mywl_items"] = items          # instant, no race condition
+    try:
+        if _has_supabase():
+            rows = requests.get(_sb_mywl_url(), headers=_sb_headers(), timeout=10).json()
+            if rows:
+                requests.patch(_sb_mywl_url(), headers=_sb_headers(),
+                               json={"data": items}, timeout=10)
+            else:
+                requests.post(st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/journal",
+                              headers=_sb_headers(),
+                              json={"id": 2, "data": items}, timeout=10)
         else:
-            requests.post(st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/journal",
-                          headers=_sb_headers(), json={"id": 2, "data": items}, timeout=10)
-        return
-    with open(MY_WATCHLIST_FILE, "w") as f:
-        json.dump(items, f, indent=2)
+            with open(MY_WATCHLIST_FILE, "w") as f:
+                json.dump(items, f, indent=2)
+    except Exception:
+        pass  # session state already updated; storage will sync on next save
 
 
 # ── ticker universes ──────────────────────────────────────────────────────────
@@ -782,9 +798,9 @@ elif page == "My Watchlist":
                 st.warning(f"{ticker_to_add} is already in your watchlist.")
             else:
                 items.append({"ticker": ticker_to_add, "added": date.today().isoformat()})
-                save_my_watchlist(items)
-                st.success(f"{ticker_to_add} added.")
-                st.rerun()
+                save_my_watchlist(items)   # updates session state instantly
+                tickers_in_list.append(ticker_to_add)
+                st.success(f"{ticker_to_add} added to your watchlist.")
 
     # ── current list ──────────────────────────────────────────────────────────
     if not items:
