@@ -300,7 +300,8 @@ def fetch_history(ticker, days=150):
     end   = datetime.today()
     start = end - timedelta(days=days)
     df = yf.download(ticker, start=start.strftime("%Y-%m-%d"),
-                     end=end.strftime("%Y-%m-%d"), progress=False, auto_adjust=True)
+                     end=end.strftime("%Y-%m-%d"), progress=False,
+                     auto_adjust=True, threads=False)
     return flatten(df) if not df.empty else None
 
 def days_held(entry_date_str):
@@ -410,7 +411,7 @@ def run_scan(tickers, progress_bar, status_text):
 def daily_check(ticker, entry_price, entry_date_str):
     """Returns dict with hold/sell signal and supporting data."""
     try:
-        df = yf.download(ticker, period="40d", progress=False, auto_adjust=True)
+        df = yf.download(ticker, period="40d", progress=False, auto_adjust=True, threads=False)
         df = flatten(df)
         if df.empty:
             return None
@@ -503,7 +504,8 @@ def build_chart(ticker, entry, stop, t1, t2, t3):
     end   = datetime.today()
     start = end - timedelta(days=120)
     df = yf.download(ticker, start=start.strftime("%Y-%m-%d"),
-                     end=end.strftime("%Y-%m-%d"), progress=False, auto_adjust=True)
+                     end=end.strftime("%Y-%m-%d"), progress=False,
+                     auto_adjust=True, threads=False)
     df = flatten(df)
     if df.empty:
         return None
