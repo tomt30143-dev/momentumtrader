@@ -648,6 +648,19 @@ elif page == "Find Stocks":
                     save_journal(journal)
                     st.success("Trade opened! Go to **Today's Check** to monitor it daily.")
 
+        def add_to_mywl_button(s):
+            mywl = load_my_watchlist()
+            already = s["ticker"] in [x["ticker"] for x in mywl]
+            if already:
+                st.caption(f"✅ Already in My Watchlist")
+            else:
+                if st.button(f"⭐ Add {s['ticker']} to My Watchlist",
+                             key=f"mywl_{s['ticker']}_{s.get('score',0)}",
+                             use_container_width=True):
+                    mywl.append({"ticker": s["ticker"], "added": date.today().isoformat()})
+                    save_my_watchlist(mywl)
+                    st.success(f"{s['ticker']} added to My Watchlist.")
+
         def stock_card(s, rank=None):
             with st.container(border=True):
                 col1, col2, col3, col4 = st.columns([2, 2, 2, 3])
@@ -660,7 +673,11 @@ elif page == "Find Stocks":
                 col3.metric("Vol drying",    "Yes ✅" if s["vol_dry"] else "No")
                 col4.markdown(f"**Stop loss:** ${s['stop']:.2f}  *(risk: ${s['risk']:.2f}/share)*")
                 col4.markdown(f"**Target 1:** ${s['t1']:.2f} &nbsp; **Target 2:** ${s['t2']:.2f} &nbsp; **Target 3:** ${s['t3']:.2f}")
-                open_trade_button(s)
+                bcol1, bcol2 = st.columns(2)
+                with bcol1:
+                    open_trade_button(s)
+                with bcol2:
+                    add_to_mywl_button(s)
 
         # ── THE BUY — top scored breakout or buy-soon ─────────────────────────
         st.divider()
@@ -767,11 +784,16 @@ elif page == "My Watchlist":
     tickers_in_list = [i["ticker"] for i in items]
 
     # ── add ticker ────────────────────────────────────────────────────────────
-    col1, col2 = st.columns([4, 1])
-    new_t = col1.text_input("", placeholder="Type a ticker to add, e.g. PLTR",
-                            label_visibility="collapsed").upper().strip()
-    if col2.button("Add to Watchlist", type="primary", use_container_width=True) and new_t:
-        if new_t in tickers_in_list:
+    with st.form("add_to_mywl", clear_on_submit=True):
+        col1, col2 = st.columns([4, 1])
+        new_t = col1.text_input("", placeholder="Type a ticker to add, e.g. PLTR",
+                                label_visibility="collapsed")
+        submitted = col2.form_submit_button("Add to Watchlist", type="primary", use_container_width=True)
+    if submitted:
+        new_t = new_t.upper().strip()
+        if not new_t:
+            st.warning("Enter a ticker symbol first.")
+        elif new_t in tickers_in_list:
             st.warning(f"{new_t} is already in your watchlist.")
         else:
             items.append({"ticker": new_t, "added": date.today().isoformat()})
