@@ -130,23 +130,20 @@ def load_my_watchlist():
     return st.session_state["mywl_items"]
 
 def save_my_watchlist(items):
-    """Write to session state immediately, then persist to storage."""
-    st.session_state["mywl_items"] = items          # instant, no race condition
+    """Write to session state immediately, then persist to storage via upsert."""
+    st.session_state["mywl_items"] = items
     try:
         if _has_supabase():
-            rows = requests.get(_sb_mywl_url(), headers=_sb_headers(), timeout=10).json()
-            if rows:
-                requests.patch(_sb_mywl_url(), headers=_sb_headers(),
-                               json={"data": items}, timeout=10)
-            else:
-                requests.post(st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/journal",
-                              headers=_sb_headers(),
-                              json={"id": 2, "data": items}, timeout=10)
+            url = st.secrets["SUPABASE_URL"].rstrip("/") + "/rest/v1/journal"
+            headers = {**_sb_headers(),
+                       "Prefer": "resolution=merge-duplicates,return=representation"}
+            requests.post(url, headers=headers,
+                          json={"id": 2, "data": items}, timeout=10)
         else:
             with open(MY_WATCHLIST_FILE, "w") as f:
                 json.dump(items, f, indent=2)
     except Exception:
-        pass  # session state already updated; storage will sync on next save
+        pass
 
 
 # ── ticker universes ──────────────────────────────────────────────────────────
@@ -299,13 +296,18 @@ def flatten(df):
 def fetch_history(ticker, days=150):
     end   = datetime.today()
     start = end - timedelta(days=days)
-    try:
-        df = yf.Ticker(ticker).history(start=start.strftime("%Y-%m-%d"),
-                                       end=end.strftime("%Y-%m-%d"),
-                                       auto_adjust=True)
-        return df if not df.empty else None
-    except Exception:
-        return None
+    for attempt in range(2):
+        try:
+            df = yf.Ticker(ticker).history(start=start.strftime("%Y-%m-%d"),
+                                           end=end.strftime("%Y-%m-%d"),
+                                           auto_adjust=True)
+            if not df.empty:
+                return df
+        except Exception:
+            pass
+        if attempt == 0:
+            time.sleep(1)
+    return None
 
 def days_held(entry_date_str):
     try:
